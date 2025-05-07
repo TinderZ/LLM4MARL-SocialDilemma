@@ -1,3 +1,12 @@
+'''
+Author: Zhurun Zhang
+Date: 2025-05-07 20:04:11
+LastEditors: Zhurun Zhang
+LastEditTime: 2025-05-07 23:29:23
+FilePath: \myrespo\LLM4MARL-SocialDilemma\envs\constants.py
+Description: Always happy to chat! Reach out via email < b23042510@njupt.edu.cn or 2857895300@qq.com >
+
+'''
 # constants.py
 import numpy as np
 
@@ -115,13 +124,15 @@ DEFAULT_COLOURS = {
 # Cleanup 环境特定参数 (Cleanup Environment Specific Parameters)
 CLEANUP_VIEW_SIZE = 7  # Agent's view range (original was 7x7)
 
-FIRE_BEAM_LENGTH = 4
-CLEAN_BEAM_LENGTH = 4 # 
+FIRE_BEAM_LENGTH = 2
+CLEAN_BEAM_LENGTH = 5 #
+CLEAN_BEAM_LENGTH_VALID = 3
 FIRE_BEAM_WIDTH = 1   # 
 CLEAN_BEAM_WIDTH = 3  
 
-PENALTY_HIT = 10      # Penalty for being hit by a fire beam
-PENALTY_FIRE = 1      # Cost for firing a penalty beam
+
+PENALTY_HIT = 0      # Penalty for being hit by a fire beam
+PENALTY_FIRE = 0      # Cost for firing a penalty beam
 CLEAN_REWARD = 0      # Reward/cost for firing a cleaning beam (original was 0)
 APPLE_REWARD = 1      # Reward for collecting an apple
 
@@ -129,13 +140,13 @@ APPLE_REWARD = 1      # Reward for collecting an apple
 THRESHOLD_DEPLETION = 0.5
 THRESHOLD_RESTORATION = 0.0
 WASTE_SPAWN_PROBABILITY = 0.03
-APPLE_RESPAWN_PROBABILITY = 0.05
-
+APPLE_RESPAWN_PROBABILITY = 0.12
 
 # --- Constants for Immobilization ---
 IMMOBILIZE_DURATION_HIT = 50  # Steps agent is immobilized after being hit
-IMMOBILIZE_DURATION_FIRE = 4   # Steps agent is immobilized after firing
+IMMOBILIZE_DURATION_FIRE = 5   # Steps agent is immobilized after firing
 STAY_ACTION_INDEX = 4         # Index corresponding to the "STAY" action in ACTION_MEANING
+
 
 
 # 地图字符 (Map Characters)
