@@ -192,7 +192,7 @@ class CleanupEnv(ParallelEnv):
                 start_pos=spawn_pos,
                 start_orientation=orientation,
                 view_len=CLEANUP_VIEW_SIZE,
-                immobilized_steps_remaining=0
+                
             )
             # Remove agent start 'P' from world map
             self.world_map[spawn_pos[0], spawn_pos[1]] = EMPTY
