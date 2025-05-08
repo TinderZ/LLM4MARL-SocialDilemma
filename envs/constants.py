@@ -2,7 +2,7 @@
 Author: Zhurun Zhang
 Date: 2025-05-07 20:04:11
 LastEditors: Zhurun Zhang
-LastEditTime: 2025-05-07 23:29:23
+LastEditTime: 2025-05-08 08:35:58
 FilePath: \myrespo\LLM4MARL-SocialDilemma\envs\constants.py
 Description: Always happy to chat! Reach out via email < b23042510@njupt.edu.cn or 2857895300@qq.com >
 
@@ -100,7 +100,7 @@ DEFAULT_COLOURS = {
     b'': np.array([180, 180, 180], dtype=np.uint8),     # Grey board walls
     b'@': np.array([180, 180, 180], dtype=np.uint8),     # Grey board walls
     b'A': np.array([255, 0, 0], dtype=np.uint8),        # red apples
-    b'B': np.array([124, 252, 0], dtype=np.uint8),      # green lawns
+    #b'B': np.array([124, 252, 0], dtype=np.uint8),      # green lawns
     b'F': np.array([255, 255, 0], dtype=np.uint8),      # Yellow firing beam (penalty)
     b'P': np.array([159, 67, 255], dtype=np.uint8),     # Generic agent (any player) - Will be overridden by agent ID
     # Default agent colors (can be extended)

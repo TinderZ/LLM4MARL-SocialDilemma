@@ -186,11 +186,13 @@ class CleanupEnv(ParallelEnv):
             spawn_pos = np.array(available_spawn_points[i])
             # Random initial orientation
             orientation = random.choice(list(ORIENTATIONS.keys()))
+            #self._agents[agent_id].reset(spawn_pos, orientation) # Reset agent state
             self._agents[agent_id] = CleanupAgent(
                 agent_id_num=i,
                 start_pos=spawn_pos,
                 start_orientation=orientation,
-                view_len=CLEANUP_VIEW_SIZE
+                view_len=CLEANUP_VIEW_SIZE,
+                immobilized_steps_remaining=0
             )
             # Remove agent start 'P' from world map
             self.world_map[spawn_pos[0], spawn_pos[1]] = EMPTY
