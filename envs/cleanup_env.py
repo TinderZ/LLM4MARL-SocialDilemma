@@ -122,9 +122,10 @@ class CleanupEnv(ParallelEnv):
         # Will be populated in reset()
 
         # State variables updated during steps
+        self.current_waste_density = 0.0
         self.current_apple_spawn_prob = APPLE_RESPAWN_PROBABILITY
         self.current_waste_spawn_prob = WASTE_SPAWN_PROBABILITY
-        self._compute_probabilities() # Initial calculation
+        self._compute_probabilities() # Initial calculation (will also set current_waste_density)
 
         self.num_cycles = 0
         self.beam_pos = [] # Positions currently occupied by beams for rendering
@@ -366,21 +367,14 @@ class CleanupEnv(ParallelEnv):
 
         # 7. get llm commands
         if self.use_llm and (self.num_cycles % self.llm_f_step == 0):
-            # 1. Gather Game Information
-            current_waste = np.count_nonzero(self.world_map == WASTE)
-            waste_density = 0
-            if self.potential_waste_area > 0:
-                waste_density = current_waste / self.potential_waste_area
-
             game_info = ""
-            if waste_density >= THRESHOLD_DEPLETION:
+            if self.current_waste_density >= THRESHOLD_DEPLETION:
                 game_info = "River severely polluted, apples cannot grow."
-            elif waste_density <= THRESHOLD_RESTORATION:
+            elif self.current_waste_density <= THRESHOLD_RESTORATION:
                 game_info = "River is clean, apples can grow well."
             else:
-                # More nuanced info could be added here
-                game_info = f"River pollution level moderate (density: {waste_density:.2f})."
-
+                game_info = f"River pollution level moderate (density: {self.current_waste_density:.2f})."
+           
             # 2. Process Info and Get Commands for each agent active at step start
             agents_cumulative_rewards = {
                  agent_id: self._agents[agent_id].get_cumulative_reward()
@@ -816,22 +810,23 @@ class CleanupEnv(ParallelEnv):
         waste_density = 0
         if self.potential_waste_area > 0:
             waste_density = current_waste / self.potential_waste_area
+        self.current_waste_density = waste_density
 
-        if waste_density >= THRESHOLD_DEPLETION:
-            self.current_apple_spawn_prob = 0
-            if waste_density >= 0.55:
-                self.current_waste_spawn_prob = 0
-            
+        if self.current_waste_density >= 0.5: # Original logic used 0.5 here
+            self.current_waste_spawn_prob = 0
         else:
             self.current_waste_spawn_prob = WASTE_SPAWN_PROBABILITY
-            if waste_density <= THRESHOLD_RESTORATION:
+        
+        if self.current_waste_density >= THRESHOLD_DEPLETION:  # 0.45
+            self.current_apple_spawn_prob = 0
+        else: # waste_density < THRESHOLD_DEPLETION
+    
+            if self.current_waste_density <= THRESHOLD_RESTORATION:
                 self.current_apple_spawn_prob = APPLE_RESPAWN_PROBABILITY
             else:
-                # Linear interpolation between restoration and depletion thresholds 
-                # 恢复阈值和耗尽阈值之间的线性插值
-                prob = (1.0 - (waste_density - THRESHOLD_RESTORATION) / (THRESHOLD_DEPLETION - THRESHOLD_RESTORATION)) * APPLE_RESPAWN_PROBABILITY
-                self.current_apple_spawn_prob = max(0, prob) # Ensure non-negative
-
+                # Linear interpolation
+                prob = (1.0 - self.current_waste_density) * APPLE_RESPAWN_PROBABILITY
+                self.current_apple_spawn_prob = max(0, prob)
 
     def _spawn_apples_and_waste(self) -> list[tuple[int, int, bytes]]:
         """Attempts to spawn apples and waste based on current probabilities."""

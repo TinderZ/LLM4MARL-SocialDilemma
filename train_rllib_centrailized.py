@@ -1,4 +1,4 @@
-# run_scripts/train_rllib.py
+# run_scripts/train_rllib_centralized.py
 import argparse
 import os
 import sys
@@ -11,7 +11,7 @@ from ray.rllib.env.wrappers.pettingzoo_env import PettingZooEnv
 from ray.tune.registry import register_env
 from ray.rllib.models import ModelCatalog
 from ray.rllib.algorithms.ppo import PPOConfig # Using PPO directly
-from ray.rllib.policy.policy import PolicySpec # <--- 新增导入
+from ray.rllib.policy.policy import PolicySpec 
 
 # Add near the top with other imports
 import matplotlib.pyplot as plt
@@ -297,6 +297,11 @@ def parse_args():
 
     # Core PPO Hyperparameters (match run script)
     parser.add_argument("--rollout_fragment_length", type=int, default=1000, help="RLlib rollout fragment length.")
+    
+    parser.add_argument("--horizon", type=int, default=None, help="Episode horizon (max steps per episode). If None, PPO's default or env max steps will be used.")
+    parser.add_argument("--soft_horizon", action="store_true", help="Enable soft horizon. Episodes are truncated at horizon but env is not reset if True.")
+    parser.add_argument("--no_done_at_end", action="store_true", help="Set no_done_at_end. If True, the done=True signal will not be set when an episode ends solely due to reaching the horizon. Useful for RNNs.")
+    
     parser.add_argument("--train_batch_size", type=int, default=None, help="RLlib train batch size (if None, calculated).")
     parser.add_argument("--sgd_minibatch_size", type=int, default=None, help="RLlib SGD minibatch size (if None, calculated).")
     parser.add_argument("--num_sgd_iter", type=int, default=10, help="Number of SGD iterations per train batch.") # Default PPO is 10-30
@@ -407,7 +412,11 @@ def main(args):
         .rollouts(
             num_rollout_workers=args.num_workers,
             num_envs_per_worker=args.num_envs_per_worker,
-            rollout_fragment_length=args.rollout_fragment_length
+            rollout_fragment_length=args.rollout_fragment_length,
+            # for short episode
+            horizon=args.horizon,
+            soft_horizon=args.soft_horizon,
+            no_done_at_end=args.no_done_at_end
         )
         .training(
             gamma=0.99,
@@ -461,7 +470,7 @@ def main(args):
 
         .multi_agent(
             policies={
-                "policy_A": PolicySpec(
+                "policy_centralized": PolicySpec(
                     policy_class=None,  # Let RLlib use default PPO TorchPolicy
                     observation_space=obs_space, # Provide the observation space
                     action_space=act_space,      # Provide the action space
@@ -478,10 +487,8 @@ def main(args):
             },
             policy_mapping_fn=(
                 lambda agent_id, episode, worker, **kwargs:
-                "policy_A" #if int(agent_id.split('_')[-1]) < 2 else "policy_B"
+                "policy_centralized" 
             ),
-        #     # Optional: If you want to ensure certain agents are never mapped to a policy
-        #     # policies_to_train=["policy_A", "policy_B"]
         )
         
         .resources(

@@ -1,12 +1,3 @@
-'''
-Author: Zhurun Zhang
-Date: 2025-05-07 20:04:11
-LastEditors: Zhurun Zhang
-LastEditTime: 2025-05-08 15:18:29
-FilePath: \LLM4MARL-SocialDilemma\envs\constants.py
-Description: Always happy to chat! Reach out via email < b23042510@njupt.edu.cn or 2857895300@qq.com >
-
-'''
 # constants.py
 import numpy as np
 
@@ -16,24 +7,24 @@ CLEANUP_MAP = [
     "@RRRRRR     BBBBB@",
     "@HHHHHH      BBBB@",
     "@RRRRRR     BBBBB@",
-    "@RRRRR  P    BBBB@",
+    "@HHHHH  P    BBBB@",
     "@RRRRR    P BBBBB@",
     "@HHHHH       BBBB@",
-    "@RRRRR      BBBBB@",
+    "@RRRRR   p  BBBBB@",
     "@RRRRRRSSSSSSBBBB@",
     "@HHHHHHSSSSSSBBBB@",
-    "@RRRRR   P P BBBB@",
+    "@RRRRR     P BBBB@",
     "@HHHHH   P  BBBBB@",
     "@RRRRRR    P BBBB@",
     "@HHHHHH P   BBBBB@",
     "@RRRRR       BBBB@",
     "@HHHH    P  BBBBB@",
     "@RRRRR       BBBB@",
-    "@RRRRR  P   BBBBB@",
+    "@HHHHH  P   BBBBB@",
     "@RRRRR       BBBB@",
     "@HHHH       BBBBB@",
     "@RRRRR   P   BBBB@",
-    "@HHRRR      BBBBB@",
+    "@HHHHH      BBBBB@",
     "@RRRRR       BBBB@",
     "@HHHH       BBBBB@",
     "@@@@@@@@@@@@@@@@@@",
@@ -102,6 +93,12 @@ DEFAULT_COLOURS = {
     b'A': np.array([255, 0, 0], dtype=np.uint8),        # red apples
     b'B': np.array([124, 252, 0], dtype=np.uint8),      # green lawns
     b'F': np.array([255, 255, 0], dtype=np.uint8),      # Yellow firing beam (penalty)
+    # Cleanup specific colors
+    b'C': np.array([100, 255, 255], dtype=np.uint8),     # Cyan cleaning beam
+    b'S': np.array([113, 75, 24], dtype=np.uint8),  # Stream cell (original seemed mixed, using one color)
+    b'H': np.array([99, 156, 194], dtype=np.uint8),      # Brown waste cells
+    b'R': np.array([0, 0, 150], dtype=np.uint8),         # Dark Blue river cell (differentiated from stream)
+    
     b'P': np.array([159, 67, 255], dtype=np.uint8),     # Generic agent (any player) - Will be overridden by agent ID
     # Default agent colors (can be extended)
     b'1': np.array([0, 0, 255], dtype=np.uint8),        # Blue
@@ -112,19 +109,13 @@ DEFAULT_COLOURS = {
     b'6': np.array([100, 255, 255], dtype=np.uint8),     # Cyan
     b'7': np.array([99, 99, 255], dtype=np.uint8),       # Lavender
     b'8': np.array([250, 204, 255], dtype=np.uint8),     # Pink
-
-    # Cleanup specific colors
-    b'C': np.array([100, 255, 255], dtype=np.uint8),     # Cyan cleaning beam
-    b'S': np.array([113, 75, 24], dtype=np.uint8),  # Stream cell (original seemed mixed, using one color)
-    b'H': np.array([99, 156, 194], dtype=np.uint8),      # Brown waste cells
-    b'R': np.array([0, 0, 150], dtype=np.uint8),         # Dark Blue river cell (differentiated from stream)
     # Add more agent colors if needed
 }
 
 # Cleanup 环境特定参数 (Cleanup Environment Specific Parameters)
 CLEANUP_VIEW_SIZE = 7  # Agent's view range (original was 7x7)
 
-FIRE_BEAM_LENGTH = 2
+FIRE_BEAM_LENGTH = 3
 CLEAN_BEAM_LENGTH = 5 #
 CLEAN_BEAM_LENGTH_VALID = 3
 FIRE_BEAM_WIDTH = 1   # 
@@ -137,10 +128,10 @@ CLEAN_REWARD = 0      # Reward/cost for firing a cleaning beam (original was 0)
 APPLE_REWARD = 1      # Reward for collecting an apple
 
 # 概率和阈值 (Probabilities and Thresholds)
-THRESHOLD_DEPLETION = 0.5
+THRESHOLD_DEPLETION = 0.45
 THRESHOLD_RESTORATION = 0.0
-WASTE_SPAWN_PROBABILITY = 0.03
-APPLE_RESPAWN_PROBABILITY = 0.12
+WASTE_SPAWN_PROBABILITY = 0.5
+APPLE_RESPAWN_PROBABILITY = 0.125
 
 # --- Constants for Immobilization ---
 IMMOBILIZE_DURATION_HIT = 50  # Steps agent is immobilized after being hit

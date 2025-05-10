@@ -403,7 +403,7 @@ def main(args):
             env_config=env_config,
             disable_env_checking=True # Recommended for multi-agent/complex envs
         )
-        .framework("torch") # Or "tf2"
+        .framework("torch") 
         .rollouts(
             num_rollout_workers=args.num_workers,
             num_envs_per_worker=args.num_envs_per_worker,
