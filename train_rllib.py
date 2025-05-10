@@ -270,6 +270,16 @@ def parse_args():
         "--model", type=str, default="baseline", choices=["baseline", "moa", "scm"], # Add others if refactored
         help="Model architecture."
     )
+    parser.add_argument(
+        "--policy_mode",
+        type=str,
+        default="centralized",
+        choices=["centralized", "decentralized", "two_policies"],
+        help="Defines the multi-agent policy configuration. "
+             "'centralized': Single policy for all agents. "
+             "'decentralized': One policy per agent. "
+             "'two_policies': Agents 0,1 use policy_A, rest policy_B. "
+    )
     parser.add_argument("--num_agents", type=int, default=5, help="Number of agents.")
     parser.add_argument("--num_samples", type=int, default=1, help="Number of trials to run.")
     parser.add_argument( "--seed", type=int, default=None, help="Set seed for reproducibility.")
@@ -363,6 +373,53 @@ def main(args):
     act_space = temp_env.action_space["agent_0"]
     temp_env.close()
 
+    # Dynamically define policies and mapping function ---
+    policies_dict = {}
+    actual_policy_mapping_fn = None
+    print(f"Using policy mode: {args.policy_mode}")
+
+    if args.policy_mode == "centralized":
+        policies_dict = {
+            "shared_policy": PolicySpec(
+                # policy_class is None to use the default for the algorithm (e.g., PPO TorchPolicy)
+                observation_space=obs_space,
+                action_space=act_space,
+                # config can be added here to override model or other policy-specific settings
+            )
+        }
+        actual_policy_mapping_fn = lambda agent_id, *a, **kw: "shared_policy"
+        print("Policy setup: All agents use 'shared_policy'.")
+
+    elif args.policy_mode == "decentralized":
+        policies_dict = {
+            f"agent_{i}": PolicySpec(
+                observation_space=obs_space,
+                action_space=act_space,
+            )
+            for i in range(args.num_agents)
+        }
+        # Each agent_id (e.g., "agent_0") maps to a policy_id with the same name.
+        actual_policy_mapping_fn = lambda agent_id, *a, **kw: agent_id
+        print(f"Policy setup: Each of {args.num_agents} agents uses its own policy (agent_0, agent_1, ...).")
+
+    elif args.policy_mode == "two_policies":
+        policies_dict = {
+            "policy_A": PolicySpec(observation_space=obs_space, action_space=act_space),
+            "policy_B": PolicySpec(observation_space=obs_space, action_space=act_space),
+        }
+        def mapping_fn_two_policies(agent_id, episode, worker, **kwargs):
+            agent_num = int(agent_id.split('_')[-1])
+            # Example: First 2 agents use policy_A, the rest use policy_B
+            # Adjust this condition based on how you want to split them
+            if agent_num < 2: # Agents "agent_0" and "agent_1"
+                return "policy_A"
+            else:
+                return "policy_B"
+        actual_policy_mapping_fn = mapping_fn_two_policies
+        print("Policy setup: Agents 0 & 1 use 'policy_A', others use 'policy_B'.")
+
+    else:
+        raise ValueError(f"Unknown --policy_mode: {args.policy_mode}")
 
     
     # --- Configure Algorithm ---
@@ -444,51 +501,12 @@ def main(args):
                 #"lstm_use_prev_action": True
             },
         )
-        # .multi_agent(
-        #     # Assuming identical policies for all agents using the same model class
-        #     policies={f"agent_{i}" for i in range(args.num_agents)},
-        #      # Map agent_id "agent_0", "agent_1", etc. to policy_id "agent_0", "agent_1", etc.
-        #      # policy_mapping_fn=(lambda agent_id, episode, worker, **kwargs: f"agent_{agent_id.split('_')[-1]}"),
-        #     policy_mapping_fn=(lambda agent_id, *args, **kwargs: agent_id), # Simpler mapping if policy keys match agent ids
-        # )
-
-        # .multi_agent(
-        #     policies={
-        #         f"agent_{i}": PolicySpec(
-        #             policy_class=None,  # 让 RLlib 使用默认的 PPO TorchPolicy
-        #             observation_space=obs_space, # 显式提供观察空间
-        #             action_space=act_space,      # 显式提供动作空间
-        #             # config 可以省略，让其继承顶层 config 的 model 设置
-        #             # 或者如果需要为特定策略覆盖配置，可以在这里添加:
-        #             # config={"model": {... specific overrides ...}}
-        #         )
-        #         for i in range(args.num_agents)
-        #     },
-        #     # 保持策略映射不变，将 agent_id 映射到对应的 policy_id
-        #     policy_mapping_fn=(lambda agent_id, *args, **kwargs: agent_id),
-        # )
 
         .multi_agent(
-            policies={
-                "policy_centralized": PolicySpec(
-                    policy_class=None,  # Let RLlib use default PPO TorchPolicy
-                    observation_space=obs_space, # Provide the observation space
-                    action_space=act_space,      # Provide the action space
-                    # Optional: if policy_A and policy_B have different model configs
-                    # config={"model": { ... overrides for policy_A ... }}
-                ),
-                "policy_B": PolicySpec(
-                    policy_class=None,  # Let RLlib use default PPO TorchPolicy
-                    observation_space=obs_space, # Provide the observation space
-                    action_space=act_space,      # Provide the action space
-                    # Optional: if policy_A and policy_B have different model configs
-                    # config={"model": { ... overrides for policy_B ... }}
-                )
-            },
-            policy_mapping_fn=(
-                lambda agent_id, episode, worker, **kwargs:
-                "policy_centralized" 
-            ),
+            policies=policies_dict,
+            policy_mapping_fn=actual_policy_mapping_fn,
+            # Optional: If you only want to train a subset of policies explicitly
+            # policies_to_train=["list_of_policy_ids_to_train_if_needed"]
         )
         
         .resources(
@@ -497,6 +515,7 @@ def main(args):
             num_gpus_per_worker=args.gpus_per_worker,
             num_cpus_for_local_worker = args.cpus_for_driver, # Renamed from driver
         )
+        
         # .evaluation(
         #     evaluation_interval=2,  # 每 1 次训练迭代运行一次评估
         #     evaluation_duration=1,  # 每次评估运行 1 个 episode
