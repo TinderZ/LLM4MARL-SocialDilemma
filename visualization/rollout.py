@@ -9,7 +9,8 @@ import argparse
 import os
 import shutil
 import sys
-import time # For potential pauses during rendering
+import time
+from typing import Optional, Tuple, List, Dict # For potential pauses during rendering
 
 import numpy as np
 from pettingzoo.utils.env import ActionType, AECEnv # Import AECEnv type hint

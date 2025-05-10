@@ -283,7 +283,7 @@ class CleanupEnv(ParallelEnv):
             tile = self.world_map[pos[0], pos[1]]
             if tile == APPLE:
                 agent.add_reward(APPLE_REWARD)
-                self._update_map_tile(pos[0], pos[1], EMPTY)
+                self._update_map_tile(pos[0], pos[1], APPLE_SPAWN)
 
 
         # 4. Handle Special Actions (Firing/Cleaning Beams) in random order
