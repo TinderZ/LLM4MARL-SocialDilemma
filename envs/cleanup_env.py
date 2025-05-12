@@ -2,6 +2,7 @@
 import functools
 import random
 from copy import deepcopy
+from typing import Dict, Tuple, List
 
 import gymnasium as gym
 import matplotlib.pyplot as plt
@@ -218,81 +219,86 @@ class CleanupEnv(ParallelEnv):
 
         return observations, infos # Return both observations and infos
 
-    def step(self, actions: dict[str, int]) -> tuple[dict, dict, dict, dict, dict]:
-        """Advances the environment by one step based on agent actions."""
-        self.num_cycles += 1
-        self.beam_pos = [] # Clear beams from previous step
-
-        # <--- 记录步骤开始时的活动智能体 --->
-        # 目的是确保后续的奖励、终止/截断状态和观测都基于这个列表计算
-        agents_at_step_start = self.agents[:]
-        # print(f"Active agents: {agents_at_step_start}")
-
-        # --- Handle Immobilization and Override Actions ---
-        original_actions = actions.copy() # Keep original for reference if needed
-        for agent_id in agents_at_step_start:
-            if agent_id in self._agents:
-                agent = self._agents[agent_id]
-                if agent.is_immobilized():
-                    # Override action to STAY
-                    actions[agent_id] = STAY_ACTION_INDEX
-                    # Decrement counter
-                    agent.decrement_immobilization()
 
 
-        # 1. Process Actions (Movement, Turns, Special Actions)
-        # <--- 修改: 使用 agents_at_step_start 初始化奖励字典 --->
-        rewards = {agent_id: 0.0 for agent_id in agents_at_step_start}
-        
-        agent_action_map = {} # Store decoded action strings
-        agent_new_positions = {} # Store intended new positions
-        agent_new_orientations = {} # Store new orientations
+    def _process_agent_movements(self, actions: Dict[str, int]) -> Tuple[Dict[str, str], Dict[str, np.ndarray], Dict[str, str]]:
+        """
+        Decodes actions, handles turns immediately, and determines intended positions.
+        Handles immobilization overrides.
+        """
+        agent_action_map = {}
+        agent_new_positions = {}
+        agent_new_orientations = {}
+        active_agents = self.agents[:] # Agents active at the start of this sub-step
 
-        # Decode actions and handle turns immediately
-        for agent_id, action_code in actions.items():
-            # <--- 检查 agent_id 是否在 agents_at_step_start 中 --->
-            # 忽略那些在该步骤开始时就已经不活动的智能体的动作
-            if agent_id not in self._agents or agent_id not in agents_at_step_start: continue # Skip if agent is already done
+        for agent_id in active_agents:
+            agent = self._agents.get(agent_id)
+            if not agent: continue
 
-            agent = self._agents[agent_id]
+            action_code = actions.get(agent_id)
+            if action_code is None: continue # Agent might not have provided an action
+
+            # --- Handle Immobilization ---
+            if agent.is_immobilized():
+                action_code = STAY_ACTION_INDEX # Override action
+                agent.decrement_immobilization()
+
             action_str = ACTION_MEANING.get(action_code)
             agent_action_map[agent_id] = action_str
 
             if action_str in TURN_ACTIONS:
                 new_orientation = ROTATION_MAP.get((agent.get_orientation(), action_str))
-                agent.set_orientation(new_orientation)
-                agent_new_orientations[agent_id] = new_orientation
+                if new_orientation: # Ensure valid rotation
+                    agent.set_orientation(new_orientation)
+                    agent_new_orientations[agent_id] = new_orientation
             elif action_str in MOVE_ACTIONS:
-                move_vec = MOVE_ACTIONS[action_str]    #形如[0,1]
-                # Rotate move vector based on agent orientation
+                move_vec = MOVE_ACTIONS[action_str]
                 rotated_move = self._rotate_vector(move_vec, agent.get_orientation())
                 intended_pos = agent.get_pos() + rotated_move
                 agent_new_positions[agent_id] = intended_pos
-            # Special actions (FIRE, CLEAN) are handled after movement
+            # Special actions (FIRE, CLEAN) are handled later
 
-        # 2. Resolve Movement Conflicts and Update Positions
+        return agent_action_map, agent_new_positions, agent_new_orientations
+
+
+    def _resolve_conflicts_and_update_positions(self, agent_new_positions: Dict[str, np.ndarray]):
+        """Resolves movement conflicts and updates agent positions."""
+        # This uses your existing _resolve_movement_conflicts logic
         final_positions = self._resolve_movement_conflicts(agent_new_positions)
         for agent_id, final_pos in final_positions.items():
-             self._agents[agent_id].set_pos(final_pos)
+            if agent_id in self._agents:
+                self._agents[agent_id].set_pos(final_pos)
 
-        # 3. Handle Consumption (Apples)
-        for agent_id in agents_at_step_start:
-            #if agent_id not in self._agents: continue # 确保智能体仍然存在
-            agent = self._agents[agent_id]
+    def _handle_consumption_and_special_actions(self, agent_action_map: Dict[str, str]):
+        """Handles apple consumption and beam firing in a randomized order."""
+        beam_updates = [] # Store tile changes from beams
+        
+        # --- Shuffle agent order for fairness in special actions ---
+        # Use the list of agents active at the start of the *main* step
+        active_agents_for_step = self.agents[:] 
+        # Create a list of agent IDs present in the action map to shuffle
+        agents_with_actions = [agent_id for agent_id in active_agents_for_step if agent_id in agent_action_map]
+        random.shuffle(agents_with_actions) # Shuffle the order
+        
+        # --- Handle Consumption (Apples) - Can happen before or after beams, affects reward calculation timing ---
+        # Let's do it first based on the *final* positions after conflict resolution.
+        agents_active_after_move = self.agents[:] # Re-check active agents
+        for agent_id in agents_active_after_move:
+            agent = self._agents.get(agent_id)
+            if not agent: continue
             pos = agent.get_pos()
             tile = self.world_map[pos[0], pos[1]]
             if tile == APPLE:
                 agent.add_reward(APPLE_REWARD)
-                self._update_map_tile(pos[0], pos[1], APPLE_SPAWN)
+                self._update_map_tile(pos[0], pos[1], EMPTY) # Apples turn empty, not APPLE_SPAWN
 
-
-        # 4. Handle Special Actions (Firing/Cleaning Beams) in random order
-        beam_updates = [] # Store tile changes from beams
-        for agent_id in agents_at_step_start: #shuffled_agent_ids:  无随机性
+        # --- Handle Special Actions (FIRE, CLEAN) in shuffled order ---
+        for agent_id in agents_with_actions: # Iterate using the shuffled list
             agent = self._agents.get(agent_id)
-            if not agent: continue # Agent might be done
+            if not agent: continue # Agent might have terminated/truncated already
+
             action_str = agent_action_map.get(agent_id)
-            
+
             if action_str == "FIRE":
                 agent.immobilize(IMMOBILIZE_DURATION_FIRE)
                 agent.add_reward(-PENALTY_FIRE) # Cost for firing
@@ -300,7 +306,9 @@ class CleanupEnv(ParallelEnv):
                     agent.get_pos(), agent.get_orientation(), FIRE_BEAM_LENGTH,
                     PENALTY_BEAM, [], [], FIRE_BLOCKING_CELLS, FIRE_BEAM_WIDTH
                 )
-                beam_updates.extend(fire_updates) # FIRE beam doesn't change tiles, only hits agents
+                # FIRE beam itself doesn't change tiles, just adds hits via _fire_beam internal logic
+                # and beam_pos for rendering. Updates from _fire_beam are usually empty for FIRE.
+                # beam_updates.extend(fire_updates) # Likely empty, but include for consistency
 
             elif action_str == "CLEAN":
                 agent.add_reward(CLEAN_REWARD) # Cost/reward for cleaning
@@ -310,24 +318,80 @@ class CleanupEnv(ParallelEnv):
                 )
                 beam_updates.extend(clean_updates) # Store tile changes
 
-        # Apply beam updates to the map
+        # Apply beam updates to the map *after* all beams resolved for the step
         for r, c, char in beam_updates:
-             self._update_map_tile(r, c, char)
+            self._update_map_tile(r, c, char)
 
-        # 5. Update Environment State (Waste/Apple Spawning)
+
+    def _update_environment_state(self):
+        """Handles waste/apple spawning and updates environment probabilities."""
         self._compute_probabilities() # Update probs based on current waste
         spawn_updates = self._spawn_apples_and_waste()
         for r, c, char in spawn_updates:
             self._update_map_tile(r, c, char)
 
+    def _get_llm_commands(self, agents_active_at_step_start: List[str]):
+        """Processes game info and gets commands from LLM modules if enabled."""
+        if not self.use_llm or (self.num_cycles % self.llm_f_step != 0):
+            return # Only run LLM logic at specified frequency
+
+        game_info = ""
+        if self.current_waste_density >= THRESHOLD_DEPLETION:
+            game_info = "River severely polluted, apples cannot grow."
+        elif self.current_waste_density <= THRESHOLD_RESTORATION:
+            game_info = "River is clean, apples can grow well."
+        else:
+            game_info = f"River pollution level moderate (density: {self.current_waste_density:.2f})."
+
+        # Process Info and Get Commands for each agent active at step start
+        agents_cumulative_rewards = {}
+        for agent_id in agents_active_at_step_start:
+            agent = self._agents.get(agent_id)
+            if agent:
+                agents_cumulative_rewards[agent_id] = agent.get_cumulative_reward()
+
+        for agent_id in agents_active_at_step_start:
+            if agent_id in self.llm_modules:
+                command = self.llm_modules[agent_id].process_game_info(
+                    game_info, self.llm_type, agents_cumulative_rewards
+                )
+                self.llm_commands[agent_id] = command
+            else:
+                self.llm_commands[agent_id] = None # Default to None if no LLM module
+
+
+
+    def step(self, actions: dict[str, int]) -> tuple[dict, dict, dict, dict, dict]:
+        """Advances the environment by one step based on agent actions."""
+        self.num_cycles += 1
+        self.beam_pos = [] # Clear beams from previous step
+
+        # 记录步骤开始时的活动智能体, 目的是确保后续的奖励、终止/截断状态和观测都基于这个列表计算
+        agents_at_step_start = self.agents[:]
+        # print(f"Active agents: {agents_at_step_start}")
+
+        # 1. Process Actions (Movement intents, Turns, Immobilization)
+        agent_action_map, agent_new_positions, _ = self._process_agent_movements(actions)
+
+        # 2. Resolve Movement Conflicts and Update Positions
+        self._resolve_conflicts_and_update_positions(agent_new_positions)
+
+        # 3. Handle Consumption and Special Actions (Apples, Firing/Cleaning Beams)
+        #    Uses the shuffled order internally for beam actions.
+        self._handle_consumption_and_special_actions(agent_action_map)
+
+        # 4. Update Environment State (Waste/Apple Spawning)
+        self._update_environment_state()
+
         # 6. Calculate Rewards and Termination/Truncation
         # 基于 agents_at_step_start 初始化状态字典 
+        rewards = {agent_id: 0.0 for agent_id in agents_at_step_start}
         terminations = {agent_id: False for agent_id in agents_at_step_start}
         truncations = {agent_id: False for agent_id in agents_at_step_start}
         infos = {agent_id: {} for agent_id in agents_at_step_start}
         
-        # Get rewards accumulated by agents
         
+        # Get rewards accumulated by agents
         for agent_id in agents_at_step_start:
             # if agent_id in self._agents: # Ensure agent is still active
             agent = self._agents.get(agent_id)
@@ -364,63 +428,31 @@ class CleanupEnv(ParallelEnv):
             truncations = {agent_id: True for agent_id in agents_at_step_start}
             # Don't clear self.agents here yet
 
-
-        # 7. get llm commands
-        if self.use_llm and (self.num_cycles % self.llm_f_step == 0):
-            game_info = ""
-            if self.current_waste_density >= THRESHOLD_DEPLETION:
-                game_info = "River severely polluted, apples cannot grow."
-            elif self.current_waste_density <= THRESHOLD_RESTORATION:
-                game_info = "River is clean, apples can grow well."
-            else:
-                game_info = f"River pollution level moderate (density: {self.current_waste_density:.2f})."
-           
-            # 2. Process Info and Get Commands for each agent active at step start
-            agents_cumulative_rewards = {
-                 agent_id: self._agents[agent_id].get_cumulative_reward()
-                 for agent_id in agents_at_step_start #if agent_id in self._agents
-            }
-
-            for agent_id in agents_at_step_start:
-                if agent_id in self.llm_modules:
-                    command = self.llm_modules[agent_id].process_game_info(game_info, self.llm_type, agents_cumulative_rewards)
-                    self.llm_commands[agent_id] = command
-                    #llm_outputs_this_step[agent_id] = command
-                else:
-                    # Handle case where agent might not have an LLM module? Default to None.
-                    self.llm_commands[agent_id] = None
-                    #llm_outputs_this_step[agent_id] = None
+        # 6. Get LLM commands (if applicable for this step)
+        self._get_llm_commands(agents_at_step_start)
                 
         
-        # 8. Generate observations for all agents active at the start of the step
+        # 7. Generate observations for all agents active at the start of the step
+        #    They need an observation even if they terminate/truncate *in this step*.
         observations = {}
         for agent_id in agents_at_step_start:
-            #if agent_id in self._agents: # Check if agent object still exists
-            observations[agent_id] = self._get_observation(agent_id)
-            #else:
-                # Handle cases where agent might have been unexpectedly removed
-                # Maybe return a default observation or log an error
-                # For now, we assume _get_observation handles missing agents gracefully if needed,
-                # or simply don't add the key if the agent object is gone.
-                # Let's assume _get_observation needs a valid agent_id from _agents
-                # If agent terminates/truncates, they might still need an obs for this final step
-                # The most robust way is perhaps calling _get_observation even if agent terminates this turn
-                #  try:
-                #      observations[agent_id] = self._get_observation(agent_id)
-                #  except KeyError:
-                #       print(f"Warning: Agent {agent_id} not found in self._agents when getting observation, though active at step start.")
-                #       # Decide how to handle this: skip, add default, etc.
-                #       # Skipping for now.
-                #       pass
+            try:
+                observations[agent_id] = self._get_observation(agent_id)
+            except KeyError:
+                # Agent object might not exist if something went wrong, handle gracefully
+                print(f"Warning: Agent {agent_id} not found when getting observation, returning default.")
+                # Return a default observation (e.g., zeros) matching the space
+                obs_space = self.observation_space(agent_id)
+                observations[agent_id] = np.zeros(obs_space.shape, dtype=obs_space.dtype)
 
-        # --- Modification Start: Update self.agents list based on term/trunc flags ---
+
+        # Update self.agents list based on term/trunc flags ---
         # Determine the agents who will be active in the *next* step
         next_agents = []
         for agent_id in agents_at_step_start:
             if not terminations[agent_id] and not truncations[agent_id]:
                 next_agents.append(agent_id)
         self.agents = next_agents
-        # --- Modification End ---
 
 
         if self.render_mode == "human":
@@ -429,9 +461,7 @@ class CleanupEnv(ParallelEnv):
         # PettingZoo expects dicts for all return values, keyed by agent ID
         # Ensure all returned dicts have keys from agents_at_step_start
         # (Observations dict is already handled. Rewards/Terms/Truncs/Infos were initialized based on it)
-
         return observations, rewards, terminations, truncations, infos
-
 
 
     def render(self) -> np.ndarray | None:
@@ -825,8 +855,10 @@ class CleanupEnv(ParallelEnv):
                 self.current_apple_spawn_prob = APPLE_RESPAWN_PROBABILITY
             else:
                 # Linear interpolation
-                prob = (1.0 - self.current_waste_density) * APPLE_RESPAWN_PROBABILITY
-                self.current_apple_spawn_prob = max(0, prob)
+                prob = (1.0 - (waste_density - THRESHOLD_RESTORATION) / (THRESHOLD_DEPLETION - THRESHOLD_RESTORATION)) * APPLE_RESPAWN_PROBABILITY
+                self.current_apple_spawn_prob = max(0, prob) # Ensure non-negative
+                # prob = (1.0 - self.current_waste_density) * APPLE_RESPAWN_PROBABILITY
+                # self.current_apple_spawn_prob = max(0, prob)
 
     def _spawn_apples_and_waste(self) -> list[tuple[int, int, bytes]]:
         """Attempts to spawn apples and waste based on current probabilities."""

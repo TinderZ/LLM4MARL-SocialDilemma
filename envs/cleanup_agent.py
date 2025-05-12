@@ -1,12 +1,3 @@
-'''
-Author: Zhurun Zhang
-Date: 2025-05-07 20:04:11
-LastEditors: Zhurun Zhang
-LastEditTime: 2025-05-07 23:25:52
-FilePath: \myrespo\LLM4MARL-SocialDilemma\envs\cleanup_agent.py
-Description: Always happy to chat! Reach out via email < b23042510@njupt.edu.cn or 2857895300@qq.com >
-
-'''
 # cleanup_agent.py
 import numpy as np
 from envs.constants import ORIENTATIONS, AGENT_CHARS

@@ -130,7 +130,7 @@ APPLE_REWARD = 1      # Reward for collecting an apple
 # 概率和阈值 (Probabilities and Thresholds)
 THRESHOLD_DEPLETION = 0.45
 THRESHOLD_RESTORATION = 0.0
-WASTE_SPAWN_PROBABILITY = 0.5
+WASTE_SPAWN_PROBABILITY = 0.03
 APPLE_RESPAWN_PROBABILITY = 0.125
 
 # --- Constants for Immobilization ---

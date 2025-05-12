@@ -11,9 +11,12 @@ import shutil
 import sys
 import time
 from typing import Optional, Tuple, List, Dict # For potential pauses during rendering
+import cv2  # Import OpenCV for image processing
+
 
 import numpy as np
 from pettingzoo.utils.env import ActionType, AECEnv # Import AECEnv type hint
+import gymnasium as gym# Import gym for action space handling
 
 # --- Adapt imports for your refactored structure ---
 # Assuming cleanup_env provides an AEC interface via env() factory
