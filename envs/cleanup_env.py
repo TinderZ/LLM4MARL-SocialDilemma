@@ -68,6 +68,7 @@ class CleanupEnv(ParallelEnv):
 
             use_llm: Whether to enable LLM-based observation masking.
             llm_f_step: How often (in steps) the LLM processes game info.
+            llm_type: The type of LLM to use (e.g., "rule-based", "chat-gpt").
         """
         super().__init__()
 
@@ -248,9 +249,8 @@ class CleanupEnv(ParallelEnv):
 
             if action_str in TURN_ACTIONS:
                 new_orientation = ROTATION_MAP.get((agent.get_orientation(), action_str))
-                if new_orientation: # Ensure valid rotation
-                    agent.set_orientation(new_orientation)
-                    agent_new_orientations[agent_id] = new_orientation
+                agent.set_orientation(new_orientation)
+                agent_new_orientations[agent_id] = new_orientation
             elif action_str in MOVE_ACTIONS:
                 move_vec = MOVE_ACTIONS[action_str]
                 rotated_move = self._rotate_vector(move_vec, agent.get_orientation())
@@ -285,14 +285,15 @@ class CleanupEnv(ParallelEnv):
         agents_active_after_move = self.agents[:] # Re-check active agents
         for agent_id in agents_active_after_move:
             agent = self._agents.get(agent_id)
+            command = self.llm_commands.get(agent_id) if self.use_llm else None
             if not agent: continue
             pos = agent.get_pos()
             tile = self.world_map[pos[0], pos[1]]
-            if tile == APPLE:
+            if tile == APPLE and command != "clean up":
                 agent.add_reward(APPLE_REWARD)
-                self._update_map_tile(pos[0], pos[1], EMPTY) # Apples turn empty, not APPLE_SPAWN
+                self._update_map_tile(pos[0], pos[1], APPLE_SPAWN)
 
-        # --- Handle Special Actions (FIRE, CLEAN) in shuffled order ---
+        # Handle Special Actions (FIRE, CLEAN) in shuffled order 
         for agent_id in agents_with_actions: # Iterate using the shuffled list
             agent = self._agents.get(agent_id)
             if not agent: continue # Agent might have terminated/truncated already
@@ -391,16 +392,7 @@ class CleanupEnv(ParallelEnv):
         infos = {agent_id: {} for agent_id in agents_at_step_start}
         
         
-        # Get rewards accumulated by agents
-        for agent_id in agents_at_step_start:
-            # if agent_id in self._agents: # Ensure agent is still active
-            agent = self._agents.get(agent_id)
-            if agent:  # Check if agent exists before consuming reward
-                rewards[agent_id] += agent.consume_reward() # Add rewards from hits/consumption
-                agent.add_cumulative_reward(rewards[agent_id]) # Update cumulative apple/hit reward
-                
-            else:
-                print(f"Warning: Agent {agent_id} not found in self._agents.")
+       
 
 
         # Apply collective/IAR rewards if enabled (Simplified - full IAR needs careful implementation)
@@ -430,8 +422,8 @@ class CleanupEnv(ParallelEnv):
 
         # 6. Get LLM commands (if applicable for this step)
         self._get_llm_commands(agents_at_step_start)
-                
-        
+
+
         # 7. Generate observations for all agents active at the start of the step
         #    They need an observation even if they terminate/truncate *in this step*.
         observations = {}
@@ -444,6 +436,18 @@ class CleanupEnv(ParallelEnv):
                 # Return a default observation (e.g., zeros) matching the space
                 obs_space = self.observation_space(agent_id)
                 observations[agent_id] = np.zeros(obs_space.shape, dtype=obs_space.dtype)
+
+
+         # Get rewards accumulated by agents
+        for agent_id in agents_at_step_start:
+            # if agent_id in self._agents: # Ensure agent is still active
+            agent = self._agents.get(agent_id)
+            if agent:  # Check if agent exists before consuming reward
+                rewards[agent_id] += agent.consume_reward() # Add rewards from hits/consumption
+                agent.add_cumulative_reward(rewards[agent_id]) # Update cumulative apple/hit reward
+                
+            else:
+                print(f"Warning: Agent {agent_id} not found in self._agents.")
 
 
         # Update self.agents list based on term/trunc flags ---

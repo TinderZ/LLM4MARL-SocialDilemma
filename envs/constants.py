@@ -99,7 +99,7 @@ DEFAULT_COLOURS = {
     b'H': np.array([99, 156, 194], dtype=np.uint8),      # Brown waste cells
     b'R': np.array([0, 0, 150], dtype=np.uint8),         # Dark Blue river cell (differentiated from stream)
     
-    b'P': np.array([159, 67, 255], dtype=np.uint8),     # Generic agent (any player) - Will be overridden by agent ID
+    b'P': np.array([0, 0, 0], dtype=np.uint8),     # Generic agent (any player) - Will be overridden by agent ID
     # Default agent colors (can be extended)
     b'1': np.array([0, 0, 255], dtype=np.uint8),        # Blue
     b'2': np.array([254, 151, 0], dtype=np.uint8),      # Orange
