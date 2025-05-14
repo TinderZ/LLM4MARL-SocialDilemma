@@ -4,6 +4,7 @@ import os
 import sys
 from datetime import datetime
 import pytz
+import pandas as pd # 新增导入
 
 import ray
 from ray import tune
@@ -11,14 +12,15 @@ from ray.rllib.env.wrappers.pettingzoo_env import PettingZooEnv
 from ray.tune.registry import register_env
 from ray.rllib.models import ModelCatalog
 from ray.rllib.algorithms.ppo import PPOConfig # Using PPO directly
-from ray.rllib.policy.policy import PolicySpec 
+from ray.rllib.policy.policy import PolicySpec
+from ray.rllib.algorithms.callbacks import DefaultCallbacks # 新增导入
 
 # Add near the top with other imports
 import matplotlib.pyplot as plt
 import numpy as np
 from collections import defaultdict
 import time # Optional for smoother plotting in some backends
-from ray.tune.callback import Callback
+from ray.tune.callback import Callback as TuneCallback # 重命名以避免与rllib callbacks冲突
 from ray.tune.experiment.trial import Trial  # Import Trial for type hinting
 # import threading # To handle plotting in a separate thread potentially
 import matplotlib
@@ -34,190 +36,410 @@ from models.baseline_model import BaselineModel
 # from models.scm_model import SocialCuriosityModule # Example if extending
 
 
-
-class PlottingCallback(Callback):
+class PlottingCallback(TuneCallback): # 继承自 ray.tune.callback.Callback
     """
-    A Tune Callback that plots agent metrics (loss, reward, reward variance)
-    during training and saves the plot periodically.
+    A Tune Callback that plots agent metrics during training and saves the plot periodically.
+    Now includes episode-level custom metrics: total/per-agent apples and pollution,
+    with combined plots for apple-related metrics and pollution-related metrics.
     """
-    def __init__(self, num_agents, plot_freq=5, save_path="training_metrics.png"):
+    def __init__(self, num_agents, policy_mode, plot_freq=5):
         super().__init__()
         self.num_agents = num_agents
+        self.policy_mode = policy_mode
         self.plot_freq = plot_freq # Plot every N iterations
-        # self.save_path = save_path
         self._iter = 0
+        self.agent_ids = [f"agent_{i}" for i in range(self.num_agents)]
 
-        # Data storage: dictionary mapping agent_id to list of metrics
+        # Data storage for standard metrics
         self.policy_loss = defaultdict(list)
-        self.mean_reward = defaultdict(list) # Use mean reward as proxy for total
-        self.reward_variance = defaultdict(list) # Store overall variance here for simplicity
-        self.timesteps = [] # Shared x-axis
+        self.mean_reward = defaultdict(list)
+        self.reward_variance = defaultdict(list) # Only one overall variance line
+        self.timesteps = []
 
-        # Plotting setup (run in main thread initially)
+        # Data storage for custom episode metrics
+        self.ep_total_apples_hist = []
+        self.ep_total_pollution_hist = []
+        self.ep_agent_apples_hist = defaultdict(list)
+        self.ep_agent_pollution_hist = defaultdict(list)
+
         self._setup_plot()
-        # self._lock = threading.Lock() # Lock for thread safety if needed
 
     def _setup_plot(self):
-        """Initialize the Matplotlib figure and axes."""
-        # plt.ion() # Turn on interactive mode if needed, but Agg backend is better for saving
-        self.fig, self.axes = plt.subplots(3, 1, figsize=(10, 12), sharex=True)
-        self.fig.suptitle("Agent Training Metrics")
+        self.fig, self.axes = plt.subplots(5, 1, figsize=(12, 18), sharex=True) # 更改为5个子图
+        self.fig.suptitle("Agent Training Metrics", fontsize=16)
 
         self.axes[0].set_ylabel("Mean Policy Loss")
         self.axes[1].set_ylabel("Mean Episode Reward")
         self.axes[2].set_ylabel("Episode Reward Variance (Overall)")
-        self.axes[2].set_xlabel("Training Timesteps")
+        self.axes[3].set_ylabel("Apples Collected (Episode)") # Combined Apple Metrics
+        self.axes[4].set_ylabel("Pollution Cleaned (Episode)") # Combined Pollution Metrics
+        self.axes[4].set_xlabel("Training Timesteps") # X-axis label on the last subplot
 
-        # Initial empty plot lines for legends
+        # Initial empty plot lines for standard metrics
         self.lines_loss = {}
         self.lines_reward = {}
-        self.line_variance = None # Only one line for overall variance
+        self.line_variance, = self.axes[2].plot([], [], label="Overall Reward Variance", color='red', linestyle='--')
 
-        agent_ids = [f"agent_{i}" for i in range(self.num_agents)]
-        colors = plt.cm.viridis(np.linspace(0, 1, self.num_agents)) # Use a colormap
+        # Lines for combined custom metrics plots
+        # Axes[3] for Apples
+        self.line_total_apples, = self.axes[3].plot([], [], label="Total Apples", color='darkgreen', linewidth=2)
+        self.lines_agent_apples = {}
 
-        for i, agent_id in enumerate(agent_ids):
-            self.lines_loss[agent_id], = self.axes[0].plot([], [], label=f"{agent_id} Loss", color=colors[i])
-            self.lines_reward[agent_id], = self.axes[1].plot([], [], label=f"{agent_id} Reward", color=colors[i])
+        # Axes[4] for Pollution
+        self.line_total_pollution, = self.axes[4].plot([], [], label="Total Pollution", color='saddlebrown', linewidth=2)
+        self.lines_agent_pollution = {}
 
-        # Use a single line for overall reward variance across all agents
-        self.line_variance, = self.axes[2].plot([], [], label="Overall Reward Variance", color='red')
+        colors = plt.cm.viridis(np.linspace(0, 1, self.num_agents))
 
-        self.axes[0].legend(loc='upper right')
-        self.axes[1].legend(loc='lower right')
-        self.axes[2].legend(loc='upper right')
-        self.fig.tight_layout(rect=[0, 0.03, 1, 0.97]) # Adjust layout to prevent title overlap
+        for i, agent_id in enumerate(self.agent_ids):
+            # Standard metrics
+            self.lines_loss[agent_id], = self.axes[0].plot([], [], label=f"{agent_id} Loss", color=colors[i], alpha=0.7)
+            self.lines_reward[agent_id], = self.axes[1].plot([], [], label=f"{agent_id} Reward", color=colors[i], alpha=0.7)
+            
+            # Per-agent custom metrics (on combined plots)
+            self.lines_agent_apples[agent_id], = self.axes[3].plot([], [], label=f"{agent_id} Apples", color=colors[i], alpha=0.7, linestyle=':')
+            self.lines_agent_pollution[agent_id], = self.axes[4].plot([], [], label=f"{agent_id} Pollution", color=colors[i], alpha=0.7, linestyle=':')
+
+        for i in range(5): # Iterate through all 5 axes
+            self.axes[i].legend(loc='best', fontsize='small')
+            self.axes[i].grid(True, linestyle='--', alpha=0.5) # Add grid for better readability
+        
+        self.fig.tight_layout(rect=[0, 0.03, 1, 0.96])
 
 
-    def on_trial_result(self, iteration: int, trials: list, trial: "Trial", result: dict, **info):
-        """Called after each training iteration for a trial."""
+    def on_trial_result(self, iteration: int, trials: list, trial: Trial, result: dict, **info):
         self._iter += 1
         if self._iter % self.plot_freq != 0:
-            return # Only plot every N iterations
-        
+            return
+
         if not trial.logdir:
-             # Should not happen typically after trial starts, but check just in case
              print(f"PlottingCallback: Warning - trial.logdir not available in iteration {self._iter}. Skipping plot save.")
              return
-        # Define the filename within the trial directory
-        save_path = os.path.join(trial.logdir, "training_metrics.png") # <-- DYNAMIC PATH
+        save_path = os.path.join(trial.logdir, "training_metrics_detailed.png")
 
-
-        current_timesteps = result.get("timesteps_total", self._iter) # Use timesteps if available
-        self.timesteps.append(current_timesteps)
-
-        # --- Data Extraction ---
-        # Policy Loss (handle potential variations in result structure)
+        current_timesteps = result.get("timesteps_total", self._iter)
+        if not self.timesteps or self.timesteps[-1] < current_timesteps:
+            self.timesteps.append(current_timesteps)
+        
+        # --- Standard Metrics Extraction (Loss, Reward, Variance) ---
         policy_losses_found = False
         if "info" in result and "learner" in result["info"]:
-            for agent_id, policy_info in result["info"]["learner"].items():
-                 # Check if agent_id matches expected format and learner_stats exists
-                if agent_id.startswith("agent_") and "learner_stats" in policy_info:
+            for agent_id_full, policy_info in result["info"]["learner"].items():
+                target_agent_ids_for_loss = []
+                if agent_id_full in self.agent_ids:
+                    target_agent_ids_for_loss.append(agent_id_full)
+                # Assuming 'shared_policy' or 'default_policy' means it applies to all agents for plotting purposes.
+                # This might depend on whether your 'policy_mode' is 'centralized'.
+                elif "shared_policy" in agent_id_full or "default_policy" in agent_id_full or self.policy_mode == "centralized":
+                    target_agent_ids_for_loss.extend(self.agent_ids)
+
+                if "learner_stats" in policy_info:
                     loss = policy_info["learner_stats"].get("policy_loss")
                     if loss is not None:
-                         self.policy_loss[agent_id].append(loss)
-                         policy_losses_found = True
-                    else:
-                         # Append NaN or previous value if loss is missing for this step
-                         self.policy_loss[agent_id].append(self.policy_loss[agent_id][-1] if self.policy_loss[agent_id] else np.nan)
-
-        # Fallback or if structure is different (might be aggregated)
-        if not policy_losses_found and "policy_loss" in result:
-             # This is likely aggregated, plot the same for all agents
+                        for ag_id in target_agent_ids_for_loss:
+                            self.policy_loss[ag_id].append(loss)
+                        policy_losses_found = True
+                    else: 
+                        for ag_id in target_agent_ids_for_loss:
+                            self.policy_loss[ag_id].append(self.policy_loss[ag_id][-1] if self.policy_loss[ag_id] else np.nan)
+        
+        if not policy_losses_found and "policy_loss" in result: 
              agg_loss = result["policy_loss"]
-             for i in range(self.num_agents):
-                agent_id = f"agent_{i}"
+             for agent_id in self.agent_ids:
                 self.policy_loss[agent_id].append(agg_loss)
+        
+        for agent_id in self.agent_ids:
+            while len(self.policy_loss[agent_id]) < len(self.timesteps):
+                self.policy_loss[agent_id].insert(0, np.nan) if self.timesteps and self.policy_loss[agent_id] else self.policy_loss[agent_id].append(np.nan)
 
 
-        # Mean Episode Reward per Policy
         rewards_found = False
         if "policy_reward_mean" in result and isinstance(result["policy_reward_mean"], dict):
-            for agent_id, reward in result["policy_reward_mean"].items():
-                if agent_id.startswith("agent_"):
-                    self.mean_reward[agent_id].append(reward)
+            processed_agents_reward = set()
+            for policy_id_key, reward_val in result["policy_reward_mean"].items():
+                # In centralized, key might be 'shared_policy'. In decentralized, 'agent_0', 'agent_1'.
+                if policy_id_key in self.agent_ids: # Decentralized
+                    self.mean_reward[policy_id_key].append(reward_val)
+                    processed_agents_reward.add(policy_id_key)
                     rewards_found = True
-            # Fill missing agents for this step if needed
-            for i in range(self.num_agents):
-                agent_id = f"agent_{i}"
-                if agent_id not in result["policy_reward_mean"]:
-                    self.mean_reward[agent_id].append(self.mean_reward[agent_id][-1] if self.mean_reward[agent_id] else np.nan)
+                # If centralized, apply this single reward to all agents for plotting
+                elif self.policy_mode == "centralized": # Check against actual policy_mode
+                    for agent_id_iter in self.agent_ids:
+                        self.mean_reward[agent_id_iter].append(reward_val)
+                        processed_agents_reward.add(agent_id_iter)
+                    rewards_found = True 
+                    break # Shared policy reward found and applied to all
 
-        # Fallback using overall mean reward
-        if not rewards_found and "episode_reward_mean" in result:
+            for agent_id_iter in self.agent_ids:
+                if agent_id_iter not in processed_agents_reward:
+                    self.mean_reward[agent_id_iter].append(self.mean_reward[agent_id_iter][-1] if self.mean_reward[agent_id_iter] else np.nan)
+
+        if not rewards_found and "episode_reward_mean" in result: 
             agg_reward = result["episode_reward_mean"]
-            for i in range(self.num_agents):
-                agent_id = f"agent_{i}"
-                self.mean_reward[agent_id].append(agg_reward)
+            for agent_id_iter in self.agent_ids:
+                self.mean_reward[agent_id_iter].append(agg_reward)
 
+        for agent_id_iter in self.agent_ids:
+             while len(self.mean_reward[agent_id_iter]) < len(self.timesteps):
+                self.mean_reward[agent_id_iter].insert(0, np.nan) if self.timesteps and self.mean_reward[agent_id_iter] else self.mean_reward[agent_id_iter].append(np.nan)
 
-        # Reward Variance (using overall episode rewards)
-        variance = np.nan # Default to NaN
+        variance = np.nan
         if "hist_stats" in result and "episode_reward" in result["hist_stats"]:
-            episode_rewards = result["hist_stats"]["episode_reward"]
-            if len(episode_rewards) > 1: # Need at least 2 points for variance
-                variance = np.var(episode_rewards)
-        # Append the same overall variance to the shared list
+            episode_rewards_list = result["hist_stats"]["episode_reward"]
+            if len(episode_rewards_list) > 1: variance = np.var(episode_rewards_list)
         self.reward_variance["overall"].append(variance)
+        while len(self.reward_variance["overall"]) < len(self.timesteps):
+            self.reward_variance["overall"].insert(0, np.nan) if self.timesteps and self.reward_variance["overall"] else self.reward_variance["overall"].append(np.nan)
 
+
+        # --- Custom Metrics Extraction ---
+        custom_metrics_data = result.get("custom_metrics", {})
+        self.ep_total_apples_hist.append(custom_metrics_data.get("ep_total_apples_collected_mean", np.nan))
+        self.ep_total_pollution_hist.append(custom_metrics_data.get("ep_total_pollution_cleaned_mean", np.nan))
+
+        for agent_id in self.agent_ids:
+            self.ep_agent_apples_hist[agent_id].append(custom_metrics_data.get(f"{agent_id}_ep_apples_mean", np.nan))
+            self.ep_agent_pollution_hist[agent_id].append(custom_metrics_data.get(f"{agent_id}_ep_pollution_mean", np.nan))
+        
+        # Pad custom metrics history
+        current_len = len(self.timesteps)
+        while len(self.ep_total_apples_hist) < current_len:
+            self.ep_total_apples_hist.insert(0, np.nan)
+        while len(self.ep_total_pollution_hist) < current_len:
+            self.ep_total_pollution_hist.insert(0, np.nan)
+        for agent_id in self.agent_ids:
+            while len(self.ep_agent_apples_hist[agent_id]) < current_len:
+                self.ep_agent_apples_hist[agent_id].insert(0, np.nan)
+            while len(self.ep_agent_pollution_hist[agent_id]) < current_len:
+                self.ep_agent_pollution_hist[agent_id].insert(0, np.nan)
 
         # --- Update Plot ---
-        # Use lock for potential threading issues, though Agg backend might avoid them
-        agent_ids = [f"agent_{i}" for i in range(self.num_agents)]
-        min_len = len(self.timesteps) # Ensure all data lists match length of x-axis
+        min_len = len(self.timesteps) # Should be same as current_len now
+        if min_len == 0: return # Nothing to plot if no timesteps
 
-        for agent_id in agent_ids:
-            # Pad data if necessary (e.g., if an agent's data was missing initially)
-            while len(self.policy_loss[agent_id]) < min_len:
-                self.policy_loss[agent_id].insert(0, np.nan) # Pad start
-            while len(self.mean_reward[agent_id]) < min_len:
-                self.mean_reward[agent_id].insert(0, np.nan) # Pad start
-
-            # Update plot data if lines exist
+        for agent_id in self.agent_ids:
             if agent_id in self.lines_loss:
                 self.lines_loss[agent_id].set_data(self.timesteps, self.policy_loss[agent_id][-min_len:])
             if agent_id in self.lines_reward:
                 self.lines_reward[agent_id].set_data(self.timesteps, self.mean_reward[agent_id][-min_len:])
+            # Update custom per-agent metrics plots (on combined axes)
+            if agent_id in self.lines_agent_apples:
+                self.lines_agent_apples[agent_id].set_data(self.timesteps, self.ep_agent_apples_hist[agent_id][-min_len:])
+            if agent_id in self.lines_agent_pollution:
+                self.lines_agent_pollution[agent_id].set_data(self.timesteps, self.ep_agent_pollution_hist[agent_id][-min_len:])
 
-        # Update overall variance plot data
-        while len(self.reward_variance["overall"]) < min_len:
-            self.reward_variance["overall"].insert(0, np.nan)
-        # Update variance line if it exists
         if self.line_variance:
             self.line_variance.set_data(self.timesteps, self.reward_variance["overall"][-min_len:])
-        # Rescale axes
+        
+        # Update custom total metrics plots (on combined axes)
+        self.line_total_apples.set_data(self.timesteps, self.ep_total_apples_hist[-min_len:])
+        self.line_total_pollution.set_data(self.timesteps, self.ep_total_pollution_hist[-min_len:])
+
         for ax in self.axes:
             ax.relim()
             ax.autoscale_view(True, True, True)
 
-        # Redraw and save
         try:
-            self.fig.canvas.draw_idle() # Request redraw
-            self.fig.savefig(save_path) # <-- Use the dynamic save_path
-            # print(f"PlottingCallback: Saved plot to {save_path}") # Optional: for debugging
+            self.fig.canvas.draw_idle()
+            self.fig.savefig(save_path)
+            # print(f"PlottingCallback: Saved plot to {save_path}") 
         except Exception as e:
-             # Log error but don't crash the whole training run
              print(f"PlottingCallback: Failed to save plot to {save_path}: {e}")
-    # plt.pause(0.01) # Small pause might be needed for some backends/interactive use
-
-
-    # Optional: Close plot when trial ends or experiment finishes
-    # def on_trial_complete(self, iteration: int, trials: list, trial: "Trial", **info):
-    #     self.close_plot()
-
-    # def on_experiment_end(self, trials: list, **info):
-    #     self.close_plot()
 
     def close_plot(self):
-         with self._lock:
-            if hasattr(self, 'fig') and self.fig:
-                plt.close(self.fig)
-                self.fig = None
-                self.axes = None
-                # plt.ioff() # Turn off interactive mode if it was turned on
+        if hasattr(self, 'fig') and self.fig:
+            plt.close(self.fig)
+            self.fig = None
+            self.axes = None
 
 
+class EpisodeMetricsCallback(DefaultCallbacks):
+    """
+    RLlib Callback to record detailed episode metrics:
+    - Total apples collected by all agents in the episode.
+    - Total pollution cleaned by all agents in the episode.
+    - Per-agent apples collected in the episode.
+    - Per-agent pollution cleaned in the episode.
+    These are stored in episode.custom_metrics.
+    """
+    def __init__(self, num_agents: int = None): # num_agents can be passed if known, or inferred
+        super().__init__()
+        self.num_agents_param = num_agents 
+        self.agent_ids = [] # Will be populated in on_episode_start if num_agents is known
 
+    def _initialize_agent_ids(self, episode):
+        if not self.agent_ids: # Initialize only once or if num_agents_param is set
+            if self.num_agents_param is not None:
+                 self.agent_ids = [f"agent_{i}" for i in range(self.num_agents_param)]
+            elif episode.policy_mapping_fn: # Try to infer from episode if possible (more robust)
+                 # This is a bit indirect; simpler to require num_agents if not using _agent_ids
+                 # For now, rely on num_agents_param or ensure agent_ids are present in infos
+                 pass
+
+
+    def on_episode_start(self, *, worker, base_env, policies, episode, env_index, **kwargs):
+        self._initialize_agent_ids(episode)
+        # Initialize accumulators for the episode
+        episode.user_data["ep_agent_apples"] = defaultdict(int)
+        episode.user_data["ep_agent_pollution"] = defaultdict(int)
+
+    def on_episode_step(self, *, worker, base_env, policies, episode, env_index, **kwargs):
+        #RLlib 2.x : The info dict is now available on the episode via episode.last_info_for(agent_id)
+        #or iterate episode.get_infos() which returns a dict {agent_id: info}
+        infos = episode.last_info_for() # Gets all agent infos from the last step
+        if not infos: # Might be empty if called before first step infos are processed
+            active_agents_in_step = list(episode._agent_to_last_info.keys()) # Fallback, less ideal
+            infos = episode._agent_to_last_info
+        else:
+            active_agents_in_step = list(infos.keys())
+
+        # If self.agent_ids wasn't set by num_agents_param, try to populate from observed agents
+        if not self.agent_ids and active_agents_in_step:
+            # Filter for "agent_X" pattern, sort them for consistency
+            potential_ids = sorted([aid for aid in active_agents_in_step if aid.startswith("agent_")])
+            if potential_ids:
+                self.agent_ids = potential_ids
+
+        for agent_id in self.agent_ids: # Iterate over expected agent_ids
+            info = infos.get(agent_id, {}) # Get info for the specific agent
+            if info:
+                episode.user_data["ep_agent_apples"][agent_id] += info.get("apples_collected_step", 0)
+                episode.user_data["ep_agent_pollution"][agent_id] += info.get("pollution_cleaned_step", 0)
+
+    def on_episode_end(self, *, worker, base_env, policies, episode, env_index, **kwargs):
+        ep_agent_apples = episode.user_data["ep_agent_apples"]
+        ep_agent_pollution = episode.user_data["ep_agent_pollution"]
+
+        total_apples = sum(ep_agent_apples.values())
+        total_pollution = sum(ep_agent_pollution.values())
+
+        episode.custom_metrics["ep_total_apples_collected"] = total_apples
+        episode.custom_metrics["ep_total_pollution_cleaned"] = total_pollution
+
+        for agent_id in self.agent_ids: # Use the initialized list of agent_ids
+            episode.custom_metrics[f"{agent_id}_ep_apples"] = ep_agent_apples.get(agent_id, 0)
+            episode.custom_metrics[f"{agent_id}_ep_pollution"] = ep_agent_pollution.get(agent_id, 0)
+
+
+class StepIntervalMetricsCallback(DefaultCallbacks):
+    """
+    RLlib Callback to record metrics at fixed step intervals (e.g., every 50 steps)
+    within an episode. Logs data to a CSV file in the trial's log directory.
+    Metrics:
+    - Apples collected by each agent in the interval.
+    - Pollution cleaned by each agent in the interval.
+    - LLM commands received by each agent in the interval.
+    """
+    def __init__(self, num_agents: int, interval: int = 50):
+        super().__init__()
+        self.num_agents = num_agents
+        self.agent_ids = [f"agent_{i}" for i in range(self.num_agents)]
+        self.interval = interval
+        self.interval_data_accumulator = [] # Stores dicts for CSV rows
+        self.trial_logdir = None # Will be set in on_trial_start or on_trial_result
+
+    def _reset_current_interval_stats(self, episode):
+        episode.user_data["interval_step_count"] = 0
+        episode.user_data["interval_agent_apples"] = defaultdict(int)
+        episode.user_data["interval_agent_pollution"] = defaultdict(int)
+        episode.user_data["interval_agent_llm_commands"] = defaultdict(lambda: defaultdict(int))
+
+    def on_episode_start(self, *, worker, base_env, policies, episode, env_index, **kwargs):
+        self._reset_current_interval_stats(episode)
+        if not self.trial_logdir and worker.io_context: # Try to get logdir early if possible via worker
+            # For Tune context, trial_logdir is better obtained via on_trial_result or on_trial_start
+            # This is a fallback for non-Tune use, though typically logdir is trial-specific
+            # logdir = worker.io_context.log_dir # This might be worker's log dir, not trial's
+            pass
+
+
+    def on_trial_start(self, *, trial: Trial, **kwargs): # For Tune compatibility
+        """Called when a Tune trial starts."""
+        if not self.trial_logdir:
+            self.trial_logdir = trial.logdir
+
+    def on_episode_step(self, *, worker, base_env, policies, episode, env_index, **kwargs):
+        episode.user_data["interval_step_count"] += 1
+        
+        infos = episode.last_info_for()
+        if not infos: infos = episode._agent_to_last_info # Fallback
+
+
+        for agent_id in self.agent_ids:
+            info = infos.get(agent_id, {})
+            if info:
+                episode.user_data["interval_agent_apples"][agent_id] += info.get("apples_collected_step", 0)
+                episode.user_data["interval_agent_pollution"][agent_id] += info.get("pollution_cleaned_step", 0)
+                llm_cmd = info.get("llm_command")
+                if llm_cmd:
+                    episode.user_data["interval_agent_llm_commands"][agent_id][llm_cmd] += 1
+        
+        current_ep_steps = episode.user_data["interval_step_count"]
+        if current_ep_steps > 0 and current_ep_steps % self.interval == 0:
+            interval_end_step = episode.length # Episode length is total steps so far in episode
+            interval_start_step = interval_end_step - self.interval + 1
+
+            # Ensure trial_logdir is set (might be set first time in on_trial_result if on_trial_start wasn't called or available)
+            if not self.trial_logdir and hasattr(episode, 'trial_id'): # Check if part of a Tune trial
+                 # This is a guess; robust way is through on_trial_result's 'trial' object
+                 # For now, we will ensure saving happens in on_trial_result where 'trial.logdir' is reliable.
+                 pass
+
+            record = {
+                "episode_id": str(episode.episode_id), # Convert UUID to string for pd compatibility if needed
+                "training_iteration": episode.custom_metrics.get("training_iteration", result.get("training_iteration", np.nan) if 'result' in locals() else np.nan), # Try to get training iteration
+                "timesteps_total_interval_end": episode.total_reward_これまで + interval_end_step, # Attempt global step context
+                "episode_steps_interval": f"{interval_start_step}-{interval_end_step}"
+            }
+
+            # Retrieve stats for the completed interval
+            # These were accumulated over the last 'self.interval' steps.
+            current_interval_apples = episode.user_data["interval_agent_apples"]
+            current_interval_pollution = episode.user_data["interval_agent_pollution"]
+            current_interval_llm = episode.user_data["interval_agent_llm_commands"]
+
+            for agent_id in self.agent_ids:
+                record[f"{agent_id}_apples_interval"] = current_interval_apples.get(agent_id,0)
+                record[f"{agent_id}_pollution_interval"] = current_interval_pollution.get(agent_id,0)
+                record[f"{agent_id}_llm_collect_apples_interval"] = current_interval_llm.get(agent_id, {}).get("collect apples", 0)
+                record[f"{agent_id}_llm_clean_up_interval"] = current_interval_llm.get(agent_id, {}).get("clean up", 0)
+            
+            self.interval_data_accumulator.append(record)
+            
+            # Reset stats for the next interval within the same episode
+            # Reset !!!
+            episode.user_data["interval_agent_apples"] = defaultdict(int)
+            episode.user_data["interval_agent_pollution"] = defaultdict(int)
+            episode.user_data["interval_agent_llm_commands"] = defaultdict(lambda: defaultdict(int))
+            # episode.user_data["interval_step_count"] is continuous within episode, no reset here.
+
+    def on_trial_result(self, *, trial: Trial, result: dict, **info): # For Tune context
+        """Save accumulated interval data to CSV periodically."""
+        if not self.trial_logdir: # Ensure logdir is set
+            self.trial_logdir = trial.logdir
+
+        if self.interval_data_accumulator and self.trial_logdir:
+            df = pd.DataFrame(self.interval_data_accumulator)
+            output_path = os.path.join(self.trial_logdir, "step_interval_metrics.csv")
+            
+            # Add training iteration to records if available and not already there
+            # (This is a bit of a patch, ideally it's added when record is created)
+            if "training_iteration" not in df.columns and "training_iteration" in result:
+                 df["training_iteration"] = result["training_iteration"]
+            if "timesteps_total" not in df.columns and "timesteps_total" in result: # Overall timesteps at this trial result
+                 df["timesteps_total_at_result"] = result["timesteps_total"]
+
+
+            try:
+                if os.path.exists(output_path):
+                    df.to_csv(output_path, mode='a', header=False, index=False)
+                else:
+                    df.to_csv(output_path, mode='w', header=True, index=False)
+                # print(f"StepIntervalMetricsCallback: Appended/Saved {len(self.interval_data_accumulator)} rows to {output_path}")
+            except Exception as e:
+                print(f"StepIntervalMetricsCallback: Error saving to {output_path}: {e}")
+            
+            self.interval_data_accumulator.clear()
 
 # --- Environment Registration ---
 # It's common to register environments here before Tune runs.
@@ -238,14 +460,14 @@ def env_creator(env_config):
     else:
         raise ValueError(f"Unknown environment name: {env_name}")
 # Register the environment creator function under a unique name
-ENV_NAME_REGISTERED = "ssd_cleanup_v1" # Or make this dynamic based on args.env
+ENV_NAME_REGISTERED = "ssd_cleanup" # Or make this dynamic based on args.env
 register_env(ENV_NAME_REGISTERED, env_creator)
 
 
 # --- Model Registration ---
 # Register custom models with RLlib
 # You can choose unique names or use the class directly in config
-ModelCatalog.register_custom_model("baseline_model_refactored", BaselineModel)
+ModelCatalog.register_custom_model("baseline_model&llm", BaselineModel)
 # ModelCatalog.register_custom_model("moa_model_refactored", MOAModel) # Example
 # ModelCatalog.register_custom_model("scm_model_refactored", SocialCuriosityModule) # Example
 
@@ -430,7 +652,7 @@ def main(args):
 
     # Select correct registered model name
     if args.model == "baseline":
-        model_name_registered = "baseline_model_refactored"
+        model_name_registered = "baseline_model"
     # elif args.model == "moa":
     #     model_name_registered = "moa_model_refactored"
     # elif args.model == "scm":
@@ -471,9 +693,9 @@ def main(args):
             num_envs_per_worker=args.num_envs_per_worker,
             rollout_fragment_length=args.rollout_fragment_length,
             # for short episode
-            horizon=args.horizon,
-            soft_horizon=args.soft_horizon,
-            no_done_at_end=args.no_done_at_end
+            # horizon=args.horizon,
+            # soft_horizon=args.soft_horizon,
+            # no_done_at_end=args.no_done_at_end
         )
         .training(
             gamma=0.99,
@@ -566,34 +788,37 @@ def main(args):
 
     plot_callback = PlottingCallback(
         num_agents=args.num_agents,
-        plot_freq=5,  # Update plot every 5 training iterations (adjust as needed)
+        policy_mode=args.policy_mode,
+        plot_freq=5  # Update plot every 5 training iterations (adjust as needed)
         # save_path=os.path.join(os.path.expanduser("ray_results"), # Save in default results dir
         #                         f"{experiment_full_name}_metrics.png") # Filename based on experiment
     )
 
+    # New Callbacks
+    episode_metrics_cb = EpisodeMetricsCallback(num_agents=args.num_agents)
+    step_interval_cb = StepIntervalMetricsCallback(num_agents=args.num_agents, interval=50)
+
+
     # --- Setup Tune ---
     tuner = tune.Tuner(
-        args.algorithm, # Trainable name (e.g., "PPO")
+        args.algorithm, 
         param_space=config.to_dict(),
         run_config=ray.air.RunConfig(
             name=experiment_full_name,
             stop=stop_criteria,
-            storage_path=storage_path, # Local path or S3 prefix
+            storage_path=storage_path, 
             checkpoint_config=ray.air.CheckpointConfig(
                 checkpoint_frequency=args.checkpoint_freq,
                 checkpoint_at_end=True,
-                num_to_keep=3 # Keep last 3 checkpoints
+                num_to_keep=3 
             ),
-            callbacks=[plot_callback]
+            callbacks=[plot_callback, episode_metrics_cb, step_interval_cb] # Add new callbacks here
             # Add failure config if needed
-            # failure_config=ray.air.FailureConfig(max_failures=-1), # Infinite retries
         ),
         tune_config=tune.TuneConfig(
-            num_samples=args.num_samples, # Number of trials
-            # Add scheduler if doing hyperparameter tuning
-            # scheduler=pbt_scheduler,
-            metric="episode_reward_mean", # Metric to optimize (if tuning)
-            mode="max", # Optimization mode (if tuning)
+            num_samples=args.num_samples, 
+            metric="episode_reward_mean", 
+            mode="max", 
         ),
     )
 

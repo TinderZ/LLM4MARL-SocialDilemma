@@ -1,7 +1,7 @@
 #!/bin/bash
 
 # Set experiment name
-EXP_NAME="cleanup_PPObaseline_5-10"
+EXP_NAME="cleanup_PPO&llm_5-14"
 
 # Set environment and model configurations
 ENV="cleanup"
@@ -9,15 +9,15 @@ MODEL="baseline"
 ALGORITHM="PPO"
 NUM_AGENTS=5
 STOP_TIMESTEPS=500000000
-POLICY_MODE="centralized"  # choices=["centralized", "decentralized", "two_policies"]
+POLICY_MODE="decentralized"  # choices=["centralized", "decentralized", "two_policies"]
 # Set hyperparameters
 
-NUM_WORKERS=1  # Optimized for multi-GPU parallelism
-NUM_ENVS_PER_WORKER=16  # Increased parallelism for environment instances
-ROLL_OUT_FRAGMENT_LENGTH=1000
-TRAIN_BATCH_SIZE=$((NUM_WORKERS * NUM_ENVS_PER_WORKER * ROLL_OUT_FRAGMENT_LENGTH))
+NUM_WORKERS=2  # Optimized for multi-GPU parallelism
+NUM_ENVS_PER_WORKER=8  # Increased parallelism for environment instances
+ROLL_OUT_FRAGMENT_LENGTH=100
+TRAIN_BATCH_SIZE=$((NUM_WORKERS * NUM_ENVS_PER_WORKER * ROLL_OUT_FRAGMENT_LENGTH * 10))
 SGD_MINIBATCH_SIZE=2000
-NUM_SGD_ITER=8          # ppo epochs
+NUM_SGD_ITER=5          # ppo epochs
 CHECKPOINT_FREQ=50      # save per N iter
 
 ENTROPY_COEFF=0.00176

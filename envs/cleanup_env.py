@@ -152,6 +152,8 @@ class CleanupEnv(ParallelEnv):
             agent_id: spaces.Discrete(NUM_ACTIONS) for agent_id in self.possible_agents
         }
 
+        # Add this line to store per-step stats for each agent
+        self._agent_step_stats: dict[str, dict[str, int]] = {}
 
     # --- PettingZoo API Methods ---
 
@@ -214,6 +216,12 @@ class CleanupEnv(ParallelEnv):
         infos = {agent_id: {} for agent_id in self.agents} # Create empty info dict
         #print(f"Initial observations: {observations}")
         #print(f"Initial infos: {infos}")
+
+        # In reset method, after agents are initialized
+        self._agent_step_stats = {
+            agent_id: {"apples_collected_step": 0, "pollution_cleaned_step": 0}
+            for agent_id in self.agents
+        }
 
         if self.render_mode == "human":
             self.render()
@@ -292,6 +300,9 @@ class CleanupEnv(ParallelEnv):
             if tile == APPLE and command != "clean up":
                 agent.add_reward(APPLE_REWARD)
                 self._update_map_tile(pos[0], pos[1], APPLE_SPAWN)
+                # Update step stats for apple collection
+                if agent_id in self._agent_step_stats:
+                    self._agent_step_stats[agent_id]["apples_collected_step"] += 1
 
         # Handle Special Actions (FIRE, CLEAN) in shuffled order 
         for agent_id in agents_with_actions: # Iterate using the shuffled list
@@ -303,21 +314,24 @@ class CleanupEnv(ParallelEnv):
             if action_str == "FIRE":
                 agent.immobilize(IMMOBILIZE_DURATION_FIRE)
                 agent.add_reward(-PENALTY_FIRE) # Cost for firing
-                fire_updates = self._fire_beam(
+                # _fire_beam now returns updates and cleaned_waste_count
+                fire_tile_updates, _ = self._fire_beam( # We don't expect waste cleaned by FIRE
                     agent.get_pos(), agent.get_orientation(), FIRE_BEAM_LENGTH,
                     PENALTY_BEAM, [], [], FIRE_BLOCKING_CELLS, FIRE_BEAM_WIDTH
                 )
-                # FIRE beam itself doesn't change tiles, just adds hits via _fire_beam internal logic
-                # and beam_pos for rendering. Updates from _fire_beam are usually empty for FIRE.
-                # beam_updates.extend(fire_updates) # Likely empty, but include for consistency
+                # beam_updates.extend(fire_tile_updates) # Typically empty for FIRE
 
             elif action_str == "CLEAN":
                 agent.add_reward(CLEAN_REWARD) # Cost/reward for cleaning
-                clean_updates = self._fire_beam(
+                # _fire_beam now returns updates and cleaned_waste_count
+                clean_tile_updates, num_waste_cleaned = self._fire_beam(
                     agent.get_pos(), agent.get_orientation(), CLEAN_BEAM_LENGTH,
                     CLEAN_BEAM, CLEANABLE_TILES, CLEANED_TILE_RESULT, CLEAN_BLOCKING_CELLS, CLEAN_BEAM_WIDTH
                 )
-                beam_updates.extend(clean_updates) # Store tile changes
+                beam_updates.extend(clean_tile_updates) # Store tile changes
+                # Update step stats for pollution cleaned
+                if agent_id in self._agent_step_stats:
+                    self._agent_step_stats[agent_id]["pollution_cleaned_step"] += num_waste_cleaned
 
         # Apply beam updates to the map *after* all beams resolved for the step
         for r, c, char in beam_updates:
@@ -371,6 +385,14 @@ class CleanupEnv(ParallelEnv):
         agents_at_step_start = self.agents[:]
         # print(f"Active agents: {agents_at_step_start}")
 
+        # At the beginning of the step method, after self.num_cycles += 1
+        for agent_id in agents_at_step_start: # agents_at_step_start is crucial here
+            # Ensure entry exists, especially if agents can be added/removed dynamically (though not typical for reset)
+            if agent_id not in self._agent_step_stats:
+                self._agent_step_stats[agent_id] = {"apples_collected_step": 0, "pollution_cleaned_step": 0}
+            self._agent_step_stats[agent_id]["apples_collected_step"] = 0
+            self._agent_step_stats[agent_id]["pollution_cleaned_step"] = 0
+
         # 1. Process Actions (Movement intents, Turns, Immobilization)
         agent_action_map, agent_new_positions, _ = self._process_agent_movements(actions)
 
@@ -384,7 +406,7 @@ class CleanupEnv(ParallelEnv):
         # 4. Update Environment State (Waste/Apple Spawning)
         self._update_environment_state()
 
-        # 6. Calculate Rewards and Termination/Truncation
+        # 5. Calculate Rewards and Termination/Truncation
         # 基于 agents_at_step_start 初始化状态字典 
         rewards = {agent_id: 0.0 for agent_id in agents_at_step_start}
         terminations = {agent_id: False for agent_id in agents_at_step_start}
@@ -392,8 +414,6 @@ class CleanupEnv(ParallelEnv):
         infos = {agent_id: {} for agent_id in agents_at_step_start}
         
         
-       
-
 
         # Apply collective/IAR rewards if enabled (Simplified - full IAR needs careful implementation)
         # collective reeward, inequity penalty
@@ -436,6 +456,14 @@ class CleanupEnv(ParallelEnv):
                 # Return a default observation (e.g., zeros) matching the space
                 obs_space = self.observation_space(agent_id)
                 observations[agent_id] = np.zeros(obs_space.shape, dtype=obs_space.dtype)
+
+             # Populate infos for each agent
+            # Ensure agent_id from agents_at_step_start has an entry in infos
+            current_agent_stats = self._agent_step_stats.get(agent_id, {"apples_collected_step": 0, "pollution_cleaned_step": 0})
+            infos[agent_id]["apples_collected_step"] = current_agent_stats["apples_collected_step"]
+            infos[agent_id]["pollution_cleaned_step"] = current_agent_stats["pollution_cleaned_step"]
+            infos[agent_id]["llm_command"] = self.llm_commands.get(agent_id)
+
 
 
          # Get rewards accumulated by agents
@@ -770,73 +798,123 @@ class CleanupEnv(ParallelEnv):
 
     def _fire_beam(self, start_pos: np.ndarray, orientation: str, length: int,
                    beam_char: bytes, cell_types: list[bytes], update_char: list[bytes],
-                   blocking_cells: list[bytes], beam_width: int) -> list[tuple[int, int, bytes]]:
-        """Fires a beam, potentially hitting agents or changing tiles."""
-        
+                   blocking_cells: list[bytes], beam_width: int) -> tuple[list[tuple[int, int, bytes]], int]:
+        """
+        Fires a beam, potentially hitting agents or changing tiles.
+        'length' is the range of the beam (FIRE_BEAM_LENGTH or CLEAN_BEAM_LENGTH).
+        'affect_num' logic:
+            - PENALTY_BEAM: affects 1 agent per line.
+            - CLEAN_BEAM: affects CLEAN_BEAM_LENGTH_VALID waste tiles per line.
+        Returns:
+            - list of (row, col, new_char) for map updates
+            - count of waste tiles cleaned by this beam action (across all lines)
+        """
         firing_direction = ORIENTATION_VECTORS[orientation]
-        # Simplified: Assume beam width is 1 (originates from agent's front)
-        # Original code had logic for width 3 starting slightly offset.
-        # We'll start the beam from the cell directly in front.
-        
-        updates = [] # List of (row, col, new_char) for map updates
+        updates = []
+        cleaned_waste_count = 0 # Total waste tiles cleaned by this entire beam fire action
 
-        # current_pos = start_pos + firing_direction
-
+        # Determine initial relative offsets for beam lines based on width
         if beam_width == 3:
             if orientation == "UP" or orientation == "DOWN":
-                init_pos_all = [tuple(start_pos), tuple(start_pos + [0, 1]), tuple(start_pos + [0, -1])]
+                # Beam lines originate from agent's column, and columns +/- 1
+                init_relative_offsets = [np.array([0, 0]), np.array([0, 1]), np.array([0, -1])]
             elif orientation == "RIGHT" or orientation == "LEFT":
-                init_pos_all = [tuple(start_pos), tuple(start_pos + [1, 0]), tuple(start_pos + [-1, 0])]
+                # Beam lines originate from agent's row, and rows +/- 1
+                init_relative_offsets = [np.array([0, 0]), np.array([1, 0]), np.array([-1, 0])]
+            else: # Should not happen
+                init_relative_offsets = [np.array([0,0])]
         elif beam_width == 1:
-            init_pos_all = [tuple(start_pos)]
+            init_relative_offsets = [np.array([0,0])] # Single beam line from agent's center
+        else: # Default or unsupported width
+            init_relative_offsets = [np.array([0,0])]
 
         agent_positions = {tuple(agent.get_pos()): agent_id for agent_id, agent in self._agents.items()}
 
-        for pos in init_pos_all:
-            current_pos = pos
-            affect_num = CLEAN_BEAM_LENGTH_VALID
-            for _ in range(length):
-                # Move beam forward
-                current_pos += firing_direction
-                if not self._is_position_valid(current_pos):
-                    break # Hit map boundary
+        # Determine max number of targets this beam type can affect per line
+        max_affect_on_line = 0
+        if beam_char == PENALTY_BEAM:
+            max_affect_on_line = 1  # Hits 1 agent
+        elif beam_char == CLEAN_BEAM:
+            max_affect_on_line = CLEAN_BEAM_LENGTH_VALID # Cleans up to N waste tiles
 
-                row, col = current_pos[0], current_pos[1]
-                tile_char = self.world_map[row, col]
+        for offset in init_relative_offsets:
+            # current_pos_beam_origin is the starting point of this specific beam line segment, relative to agent's start_pos
+            current_pos_beam_origin = start_pos + offset
+            # temp_beam_path_pos will track the tip of the beam as it travels
+            temp_beam_path_pos = np.copy(current_pos_beam_origin) # Use copy to avoid modifying origin
+            
+            num_affected_this_line = 0
 
-                # Add beam to render list
+            for _ in range(length): # Iterate for the range of the beam
+                # Move beam one step forward from its previous position
+                temp_beam_path_pos = temp_beam_path_pos + firing_direction
+
+                if not self._is_position_valid(temp_beam_path_pos):
+                    break # Beam line goes out of map bounds
+
+                row, col = int(temp_beam_path_pos[0]), int(temp_beam_path_pos[1])
+                tile_char_on_map = self.world_map[row, col]
+
+                # Add to beam_pos for rendering.
+                # To avoid duplicate rendering if multiple lines hit same cell, could use a set then convert.
+                # For now, simple append. Last beam char wins if overlap.
                 self.beam_pos.append((row, col, beam_char))
 
-                # Check if beam hits an agent
-                if tuple(current_pos) in agent_positions:  
-                    hit_agent_id = agent_positions[tuple(current_pos)]
-                    if beam_char == PENALTY_BEAM:  # 说明是fire 不是clean
-                        self._agents[hit_agent_id].add_reward(-PENALTY_HIT) #reward=0
-                        self._agents[hit_agent_id].immobilize(IMMOBILIZE_DURATION_HIT)
-                    # Beam stops when hitting an agent
-                    break
+                # 1. Check for agent hit
+                current_pos_tuple = tuple(temp_beam_path_pos)
+                if current_pos_tuple in agent_positions:
+                    hit_agent_id = agent_positions[current_pos_tuple]
+                    #firing_agent = None
 
-                # Check if the tile blocks the beam
-                if tile_char in blocking_cells:
-                    break # Beam stops by wall
+                    if beam_char == PENALTY_BEAM:
+                        if num_affected_this_line < max_affect_on_line:
+                            self._agents[hit_agent_id].add_reward(-PENALTY_HIT)
+                            self._agents[hit_agent_id].immobilize(IMMOBILIZE_DURATION_HIT)
+                            num_affected_this_line += 1
+                        break # PENALTY_BEAM stops at the first agent it hits on this line
+                    elif beam_char == CLEAN_BEAM:
+                        # CLEAN_BEAM don't stop when it hits an agent on this line
+                        continue 
+                
+                # 2. Check if the tile itself blocks the beam (e.g., a wall)
+                if tile_char_on_map in blocking_cells:
+                    break # Beam line is blocked
 
-                # Check if the tile is affected by the beam (e.g., cleaning waste)
-                if tile_char in cell_types:
-                    try:
-                        type_index = cell_types.index(tile_char)
-                        new_char = update_char[type_index]
-                        affect_num -= 1
-                        updates.append((row, col, new_char)) # Record the change needed
-                        # If cleaning waste, the beam might stop or continue based on rules
-                        # Original 'CLEAN' had blocking_cells=[b'H'], so it stops here.
-                        if beam_char == CLEAN_BEAM and tile_char == WASTE and affect_num == 0:
-                            break
-                    except (ValueError, IndexError):
-                        # Should not happen if cell_types and update_char match
-                        pass
+                # 3. Check if the tile can be affected by this beam type
+                if tile_char_on_map in cell_types: # cell_types for CLEAN are [WASTE]
+                    if beam_char == CLEAN_BEAM:
+                        # Only process if we haven't reached the max affectable targets for this line
+                        if num_affected_this_line < max_affect_on_line:
+                            try:
+                                type_index = cell_types.index(tile_char_on_map)
+                                new_char_to_place = update_char[type_index] # e.g., WASTE -> RIVER   # 实际上就一对替换的，从waste替换为river，不用index(list)
 
+                                # Append update, will be applied later
+                                updates.append((row, col, new_char_to_place))
+                                
+                                # If it was a waste tile that got cleaned
+                                if tile_char_on_map == WASTE:
+                                    cleaned_waste_count += 1
+                                
+                                num_affected_this_line += 1
+                                # Beam continues along its path even after cleaning,
+                                # unless max_affect_on_line for cleaning is now reached,
+                                # or it hits max range, wall, or agent.
+                            except (ValueError, IndexError):
+                                # Should not happen if cell_types and update_char are well-defined
+                                pass
+                        # If num_affected_this_line >= max_affect_on_line, this beam line can't clean more.
+                        # It still continues its path until range end, wall, or agent.
+                    # Add logic for other beam types and cell interactions if needed
+            # End of this beam line's travel
+        # End of all beam lines for this fire action
 
-        return updates
+        # Remove duplicate tile updates by converting to a set of tuples and back to list
+        # This ensures a tile is not queued for update multiple times if hit by overlapping beam lines
+        if updates:
+            updates = list(set(updates))
+
+        return updates, cleaned_waste_count
 
     def _compute_probabilities(self):
         """Computes the apple and waste spawn probabilities based on waste density."""
@@ -846,7 +924,7 @@ class CleanupEnv(ParallelEnv):
             waste_density = current_waste / self.potential_waste_area
         self.current_waste_density = waste_density
 
-        if self.current_waste_density >= 0.5: # Original logic used 0.5 here
+        if self.current_waste_density >= THRESHOLD_DEPLETION:  # 0.45
             self.current_waste_spawn_prob = 0
         else:
             self.current_waste_spawn_prob = WASTE_SPAWN_PROBABILITY
@@ -861,24 +939,27 @@ class CleanupEnv(ParallelEnv):
                 # Linear interpolation
                 prob = (1.0 - (waste_density - THRESHOLD_RESTORATION) / (THRESHOLD_DEPLETION - THRESHOLD_RESTORATION)) * APPLE_RESPAWN_PROBABILITY
                 self.current_apple_spawn_prob = max(0, prob) # Ensure non-negative
-                # prob = (1.0 - self.current_waste_density) * APPLE_RESPAWN_PROBABILITY
-                # self.current_apple_spawn_prob = max(0, prob)
 
     def _spawn_apples_and_waste(self) -> list[tuple[int, int, bytes]]:
         """Attempts to spawn apples and waste based on current probabilities."""
         spawn_updates = []
-        agent_pos_list = [tuple(a.get_pos()) for a in self._agents.values()]
+        agent_pos_list = []
+        for agent_id in self.agents:
+            agent = self._agents.get(agent_id)
+            if agent:
+                agent_pos_list.append(tuple(agent.get_pos()))
 
         # Try to spawn apples
         for r, c in self.apple_spawn_points:
-            if (self.world_map[r, c] == APPLE_SPAWN or self.world_map[r, c] == EMPTY) and tuple([r, c]) not in agent_pos_list:
+            if (self.world_map[r, c] == APPLE_SPAWN or self.world_map[r, c] == EMPTY) and \
+            tuple([r, c]) not in agent_pos_list:
                 if random.random() < self.current_apple_spawn_prob:
                     spawn_updates.append((r, c, APPLE))
 
         # Try to spawn waste 
-        for r, c in self.waste_spawn_points: # waste_spawn_points includes original H and R locations
-            if self.world_map[r, c] == EMPTY or self.world_map[r, c] == RIVER: # Can spawn on empty or river tiles
-                 if tuple([r, c]) not in agent_pos_list:
+        for r, c in self.waste_spawn_points: 
+            if (self.world_map[r, c] == EMPTY or self.world_map[r, c] == RIVER) and \
+            tuple([r, c]) not in agent_pos_list:
                     if random.random() < self.current_waste_spawn_prob:
                         spawn_updates.append((r, c, WASTE))
 

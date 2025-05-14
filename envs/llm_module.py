@@ -76,12 +76,8 @@ class LLMModule:
 
         num_agents = len(sorted_agents)
 
-        # Check if the agent is in the bottom two
-        # Handles cases with 1 or 2 agents as well
-        # if num_agents <= 2:
-        #      # If only 1 or 2 agents, everyone is "bottom two" technically
-        #      command = "collect apples"
-        if my_rank <= 2: # Rank is num_agents or num_agents - 1
+        # Check if the agent is in the bottom 
+        if my_rank <= 3: # Rank is num_agents or num_agents - 1
              command = "collect apples"
         else:
              command = "clean up"
