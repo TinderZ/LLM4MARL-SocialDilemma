@@ -336,27 +336,13 @@ class StepIntervalMetricsCallback(DefaultCallbacks):
         self.agent_ids = [f"agent_{i}" for i in range(self.num_agents)]
         self.interval = interval
         self.interval_data_accumulator = [] # Stores dicts for CSV rows
-        self.trial_logdir = None # Will be set in on_trial_start or on_trial_result
+        self.trial_logdir = None # Will be set in on_train_result
 
     def _reset_current_interval_stats(self, episode):
         episode.user_data["interval_step_count"] = 0
         episode.user_data["interval_agent_apples"] = defaultdict(int)
         episode.user_data["interval_agent_pollution"] = defaultdict(int)
         episode.user_data["interval_agent_llm_commands"] = defaultdict(lambda: defaultdict(int))
-
-    def on_episode_start(self, *, worker, base_env, policies, episode, env_index, **kwargs):
-        self._reset_current_interval_stats(episode)
-        if not self.trial_logdir and worker.io_context: # Try to get logdir early if possible via worker
-            # For Tune context, trial_logdir is better obtained via on_trial_result or on_trial_start
-            # This is a fallback for non-Tune use, though typically logdir is trial-specific
-            # logdir = worker.io_context.log_dir # This might be worker's log dir, not trial's
-            pass
-
-
-    def on_trial_start(self, *, trial: Trial, **kwargs): # For Tune compatibility
-        """Called when a Tune trial starts."""
-        if not self.trial_logdir:
-            self.trial_logdir = trial.logdir
 
     def on_episode_step(self, *, worker, base_env, policies, episode, env_index, **kwargs):
         episode.user_data["interval_step_count"] += 1
@@ -379,10 +365,10 @@ class StepIntervalMetricsCallback(DefaultCallbacks):
             interval_end_step = episode.length # Episode length is total steps so far in episode
             interval_start_step = interval_end_step - self.interval + 1
 
-            # Ensure trial_logdir is set (might be set first time in on_trial_result if on_trial_start wasn't called or available)
+            # Ensure trial_logdir is set (might be set first time in on_train_result if on_train_result wasn't called or available)
             if not self.trial_logdir and hasattr(episode, 'trial_id'): # Check if part of a Tune trial
-                 # This is a guess; robust way is through on_trial_result's 'trial' object
-                 # For now, we will ensure saving happens in on_trial_result where 'trial.logdir' is reliable.
+                 # This is a guess; robust way is through on_train_result's 'trial' object
+                 # For now, we will ensure saving happens in on_train_result where 'trial.logdir' is reliable.
                  pass
 
             record = {
@@ -413,22 +399,20 @@ class StepIntervalMetricsCallback(DefaultCallbacks):
             episode.user_data["interval_agent_llm_commands"] = defaultdict(lambda: defaultdict(int))
             # episode.user_data["interval_step_count"] is continuous within episode, no reset here.
 
-    def on_trial_result(self, *, trial: Trial, result: dict, **info): # For Tune context
-        """Save accumulated interval data to CSV periodically."""
+    def on_train_result(self, *, algorithm, result: dict, **kwargs): # For RLlib context
+        """Save accumulated interval data to CSV periodically using algorithm's logdir."""
         if not self.trial_logdir: # Ensure logdir is set
-            self.trial_logdir = trial.logdir
+            self.trial_logdir = algorithm.logdir
 
         if self.interval_data_accumulator and self.trial_logdir:
             df = pd.DataFrame(self.interval_data_accumulator)
             output_path = os.path.join(self.trial_logdir, "step_interval_metrics.csv")
             
             # Add training iteration to records if available and not already there
-            # (This is a bit of a patch, ideally it's added when record is created)
             if "training_iteration" not in df.columns and "training_iteration" in result:
                  df["training_iteration"] = result["training_iteration"]
             if "timesteps_total" not in df.columns and "timesteps_total" in result: # Overall timesteps at this trial result
                  df["timesteps_total_at_result"] = result["timesteps_total"]
-
 
             try:
                 if os.path.exists(output_path):
@@ -443,6 +427,41 @@ class StepIntervalMetricsCallback(DefaultCallbacks):
 
 # --- Environment Registration ---
 # It's common to register environments here before Tune runs.
+
+# +++ START NEW CODE +++
+class CombinedRLlibCallbacks(DefaultCallbacks):
+    def __init__(self, num_agents: int, interval: int):
+        super().__init__()
+        self.episode_cb = EpisodeMetricsCallback(num_agents=num_agents)
+        self.step_interval_cb = StepIntervalMetricsCallback(num_agents=num_agents, interval=interval)
+
+    def on_episode_start(self, *, worker, base_env, policies, episode, env_index, **kwargs):
+        self.episode_cb.on_episode_start(
+            worker=worker, base_env=base_env, policies=policies, episode=episode, env_index=env_index, **kwargs
+        )
+        self.step_interval_cb.on_episode_start(
+            worker=worker, base_env=base_env, policies=policies, episode=episode, env_index=env_index, **kwargs
+        )
+
+    def on_episode_step(self, *, worker, base_env, policies, episode, env_index, **kwargs):
+        self.episode_cb.on_episode_step(
+            worker=worker, base_env=base_env, policies=policies, episode=episode, env_index=env_index, **kwargs
+        )
+        self.step_interval_cb.on_episode_step(
+            worker=worker, base_env=base_env, policies=policies, episode=episode, env_index=env_index, **kwargs
+        )
+
+    def on_episode_end(self, *, worker, base_env, policies, episode, env_index, **kwargs):
+        self.episode_cb.on_episode_end(
+            worker=worker, base_env=base_env, policies=policies, episode=episode, env_index=env_index, **kwargs
+        )
+        # StepIntervalMetricsCallback does not have on_episode_end, but if it did, it would be called here.
+
+    def on_train_result(self, *, algorithm, result: dict, **kwargs):
+        # EpisodeMetricsCallback does not have on_train_result
+        self.step_interval_cb.on_train_result(algorithm=algorithm, result=result, **kwargs)
+# +++ END NEW CODE +++
+
 def env_creator(env_config):
     env_name = env_config.get("env_name", "cleanup")
     num_agents = env_config.get("num_agents", 5)
@@ -650,6 +669,13 @@ def main(args):
     else:
         raise ValueError(f"Unsupported algorithm: {args.algorithm}")
 
+    # Configure RLlib-specific callbacks
+    config = config.callbacks(CombinedRLlibCallbacks)
+    config = config.callbacks_config({
+        "num_agents": args.num_agents,
+        "interval": 50  # Default interval for StepIntervalMetricsCallback
+    })
+
     # Select correct registered model name
     if args.model == "baseline":
         model_name_registered = "baseline_model"
@@ -795,8 +821,8 @@ def main(args):
     )
 
     # New Callbacks
-    episode_metrics_cb = EpisodeMetricsCallback(num_agents=args.num_agents)
-    step_interval_cb = StepIntervalMetricsCallback(num_agents=args.num_agents, interval=50)
+    # episode_metrics_cb = EpisodeMetricsCallback(num_agents=args.num_agents) # Will be handled by CombinedRLlibCallbacks
+    # step_interval_cb = StepIntervalMetricsCallback(num_agents=args.num_agents, interval=50) # Will be handled by CombinedRLlibCallbacks
 
 
     # --- Setup Tune ---
@@ -812,7 +838,7 @@ def main(args):
                 checkpoint_at_end=True,
                 num_to_keep=3 
             ),
-            callbacks=[plot_callback, episode_metrics_cb, step_interval_cb] # Add new callbacks here
+            callbacks=[plot_callback] # Only Tune-specific callbacks here
             # Add failure config if needed
         ),
         tune_config=tune.TuneConfig(
