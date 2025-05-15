@@ -672,16 +672,16 @@ def main(args):
 
     # Configure RLlib-specific callbacks
     # Pass the raw class to .callbacks()
-    config = config.callbacks(CombinedRLlibCallbacks)
+    # config = config.callbacks(CombinedRLlibCallbacks) # This block is redundant and should be removed/commented
     # Assign the arguments dictionary to the .callbacks_config attribute
-    config.callbacks_config = {
-        "num_agents": args.num_agents,
-        "interval": 50  # Default interval for StepIntervalMetricsCallback, can be from args if needed
-    }
+    # config.callbacks_config = { # This block is redundant and should be removed/commented
+    #     "num_agents": args.num_agents,
+    #     "interval": 50  # Default interval for StepIntervalMetricsCallback, can be from args if needed
+    # }
 
     # Select correct registered model name
     if args.model == "baseline":
-        model_name_registered = "baseline_model&llm"
+        model_name_registered = "baseline_model&llm"  # Ensure this matches the registered name
     # elif args.model == "moa":
     #     model_name_registered = "moa_model_refactored"
     # elif args.model == "scm":
@@ -784,6 +784,13 @@ def main(args):
         #.evaluation(evaluation_interval=10, evaluation_num_workers=1)
         .debugging(seed=args.seed) # Set seed if provided, None otherwise # Set seed if provided
     )
+
+    # Set callback class and config at the very end of PPOConfig chain
+    config.callbacks_class = CombinedRLlibCallbacks # THIS BLOCK MUST BE UNCOMMENTED AND ACTIVE
+    config.callbacks_config = { # THIS BLOCK MUST BE UNCOMMENTED AND ACTIVE
+        "num_agents": args.num_agents,
+        "interval": 50  # Default interval, can be from args
+    }
 
 
     # --- Stopping Criteria ---
