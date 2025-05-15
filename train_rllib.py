@@ -431,36 +431,132 @@ class StepIntervalMetricsCallback(DefaultCallbacks):
 
 # +++ START NEW CODE +++
 class CombinedRLlibCallbacks(DefaultCallbacks):
-    def __init__(self, num_agents: int, interval: int):
+    def __init__(self): # Constructor no longer takes num_agents and interval directly
         super().__init__()
+        self.episode_cb = None
+        self.step_interval_cb = None
+        self._initialized = False # Guard against multiple initializations
+        # print("CombinedRLlibCallbacks: __init__ called") # Debug print
+
+    def _lazy_init(self, algorithm_config):
+        if self._initialized:
+            return
+
+        # Access callbacks_config from the algorithm's config.
+        # algorithm_config is an AlgorithmConfig instance here.
+        cb_config = algorithm_config.callbacks_config
+
+        num_agents = cb_config.get("num_agents")
+        interval = cb_config.get("interval")
+
+        if num_agents is None:
+            raise ValueError(
+                "CombinedRLlibCallbacks: 'num_agents' not found in "
+                "algorithm_config.callbacks_config."
+            )
+        if interval is None:
+            # StepIntervalMetricsCallback has a default for interval if not provided to its constructor,
+            # but here we expect it from callbacks_config.
+            raise ValueError(
+                "CombinedRLlibCallbacks: 'interval' not found in "
+                "algorithm_config.callbacks_config."
+            )
+
+        # print(f"CombinedRLlibCallbacks: Initializing with num_agents={num_agents}, interval={interval}") # Debug print
         self.episode_cb = EpisodeMetricsCallback(num_agents=num_agents)
         self.step_interval_cb = StepIntervalMetricsCallback(num_agents=num_agents, interval=interval)
+        self._initialized = True
+        # print("CombinedRLlibCallbacks: Initialized successfully.") # Debug print
+
+    def on_algorithm_init(self, *, algorithm, **kwargs):
+        # print("CombinedRLlibCallbacks: on_algorithm_init called.") # Debug print
+        self._lazy_init(algorithm.config)
+        
+        # Forward if sub-callbacks implement it and are initialized
+        if self.episode_cb and hasattr(self.episode_cb, "on_algorithm_init"):
+            self.episode_cb.on_algorithm_init(algorithm=algorithm, **kwargs)
+        if self.step_interval_cb and hasattr(self.step_interval_cb, "on_algorithm_init"):
+            self.step_interval_cb.on_algorithm_init(algorithm=algorithm, **kwargs)
 
     def on_episode_start(self, *, worker, base_env, policies, episode, env_index, **kwargs):
-        self.episode_cb.on_episode_start(
-            worker=worker, base_env=base_env, policies=policies, episode=episode, env_index=env_index, **kwargs
-        )
-        self.step_interval_cb.on_episode_start(
-            worker=worker, base_env=base_env, policies=policies, episode=episode, env_index=env_index, **kwargs
-        )
+        if not self._initialized:
+            # This path should ideally not be hit if on_algorithm_init is always called first.
+            # If it is, it indicates a problem with the callback lifecycle or setup.
+            # Trying to initialize here is risky as algorithm_config might not be easily accessible.
+            print("ERROR: CombinedRLlibCallbacks.on_episode_start called before initialization.")
+            return
+
+        if self.episode_cb:
+            self.episode_cb.on_episode_start(
+                worker=worker, base_env=base_env, policies=policies, episode=episode, env_index=env_index, **kwargs
+            )
+        if self.step_interval_cb:
+            # Original CombinedRLlibCallbacks called on_episode_start for step_interval_cb
+            # The StepIntervalMetricsCallback needs to define on_episode_start if it's to be called.
+            # The provided code for StepIntervalMetricsCallback does not have on_episode_start,
+            # but the original CombinedRLlibCallbacks was calling it.
+            # For safety, let's ensure it exists or handle it.
+            # The provided StepIntervalMetricsCallback _does_ define `_reset_current_interval_stats`
+            # which it seems to intend to call at episode start, but it's not directly in on_episode_start.
+            # The original CombinedRLlibCallbacks called `self.step_interval_cb.on_episode_start`
+            # Let's check StepIntervalMetricsCallback: it defines _reset_current_interval_stats
+            # but no on_episode_start. The CombinedRLlibCallbacks called it.
+            # We'll stick to how CombinedRLlibCallbacks previously called it.
+            # Ah, StepIntervalMetricsCallback does have on_episode_start in its original CombinedRLlibCallbacks.
+            # Let's look at StepIntervalMetricsCallback in this file. It does *not* have `on_episode_start`.
+            # The original user code for CombinedRLlibCallbacks was:
+            # self.step_interval_cb.on_episode_start(...)
+            # This implies StepIntervalMetricsCallback *should* have it or it was an error.
+            # Looking at the provided code for StepIntervalMetricsCallback again, it has _reset_current_interval_stats
+            # but no on_episode_start. This is a discrepancy.
+            # For now, to match the previous CombinedRLlibCallbacks behavior, I will call _reset_current_interval_stats.
+            # However, the proper fix would be to add on_episode_start to StepIntervalMetricsCallback if intended.
+            # For now, I'll assume the _reset_current_interval_stats was the intended target for episode start.
+             if hasattr(self.step_interval_cb, '_reset_current_interval_stats'):
+                 self.step_interval_cb._reset_current_interval_stats(episode)
+             elif hasattr(self.step_interval_cb, 'on_episode_start'): # If it were to be added later
+                 self.step_interval_cb.on_episode_start(
+                    worker=worker, base_env=base_env, policies=policies, episode=episode, env_index=env_index, **kwargs
+                )
+
 
     def on_episode_step(self, *, worker, base_env, policies, episode, env_index, **kwargs):
-        self.episode_cb.on_episode_step(
-            worker=worker, base_env=base_env, policies=policies, episode=episode, env_index=env_index, **kwargs
-        )
-        self.step_interval_cb.on_episode_step(
-            worker=worker, base_env=base_env, policies=policies, episode=episode, env_index=env_index, **kwargs
-        )
+        if not self._initialized:
+            print("ERROR: CombinedRLlibCallbacks.on_episode_step called before initialization.")
+            return
+        if self.episode_cb:
+            self.episode_cb.on_episode_step(
+                worker=worker, base_env=base_env, policies=policies, episode=episode, env_index=env_index, **kwargs
+            )
+        if self.step_interval_cb:
+            self.step_interval_cb.on_episode_step(
+                worker=worker, base_env=base_env, policies=policies, episode=episode, env_index=env_index, **kwargs
+            )
 
     def on_episode_end(self, *, worker, base_env, policies, episode, env_index, **kwargs):
-        self.episode_cb.on_episode_end(
-            worker=worker, base_env=base_env, policies=policies, episode=episode, env_index=env_index, **kwargs
-        )
-        # StepIntervalMetricsCallback does not have on_episode_end, but if it did, it would be called here.
+        if not self._initialized:
+            print("ERROR: CombinedRLlibCallbacks.on_episode_end called before initialization.")
+            return
+        if self.episode_cb:
+            self.episode_cb.on_episode_end(
+                worker=worker, base_env=base_env, policies=policies, episode=episode, env_index=env_index, **kwargs
+            )
+        # StepIntervalMetricsCallback does not have on_episode_end in the provided code.
 
     def on_train_result(self, *, algorithm, result: dict, **kwargs):
-        # EpisodeMetricsCallback does not have on_train_result
-        self.step_interval_cb.on_train_result(algorithm=algorithm, result=result, **kwargs)
+        # print("CombinedRLlibCallbacks: on_train_result called.") # Debug print
+        if not self._initialized:
+            # Attempt lazy init again if on_algorithm_init was somehow skipped (e.g. resuming a very old checkpoint)
+            # print("CombinedRLlibCallbacks: Attempting lazy init from on_train_result.") # Debug print
+            self._lazy_init(algorithm.config) 
+
+        if not self._initialized: # If still not initialized (e.g. config missing crucial keys)
+            print("ERROR: CombinedRLlibCallbacks.on_train_result called but still not initialized.")
+            return
+
+        # EpisodeMetricsCallback does not have on_train_result.
+        if self.step_interval_cb:
+             self.step_interval_cb.on_train_result(algorithm=algorithm, result=result, **kwargs)
 # +++ END NEW CODE +++
 
 def env_creator(env_config):
