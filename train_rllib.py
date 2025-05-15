@@ -438,13 +438,13 @@ class CombinedRLlibCallbacks(DefaultCallbacks):
         self._initialized = False # Guard against multiple initializations
         # print("CombinedRLlibCallbacks: __init__ called") # Debug print
 
-    def _lazy_init(self, algorithm_config):
+    def _lazy_init(self, source_config): # Renamed algorithm_config to source_config
         if self._initialized:
             return
 
-        # Access callbacks_config from the algorithm's config.
-        # algorithm_config is an AlgorithmConfig instance here.
-        cb_config = algorithm_config.callbacks_config
+        # Access callbacks_config from the source_config.
+        # source_config can be algorithm.config (on driver) or worker.config (on worker)
+        cb_config = source_config.callbacks_config
 
         num_agents = cb_config.get("num_agents")
         interval = cb_config.get("interval")
@@ -452,39 +452,54 @@ class CombinedRLlibCallbacks(DefaultCallbacks):
         if num_agents is None:
             raise ValueError(
                 "CombinedRLlibCallbacks: 'num_agents' not found in "
-                "algorithm_config.callbacks_config."
+                "source_config.callbacks_config."
             )
         if interval is None:
-            # StepIntervalMetricsCallback has a default for interval if not provided to its constructor,
-            # but here we expect it from callbacks_config.
             raise ValueError(
                 "CombinedRLlibCallbacks: 'interval' not found in "
-                "algorithm_config.callbacks_config."
+                "source_config.callbacks_config."
             )
 
-        # print(f"CombinedRLlibCallbacks: Initializing with num_agents={num_agents}, interval={interval}") # Debug print
+        # print(f"CombinedRLlibCallbacks: Initializing with num_agents={num_agents}, interval={interval} from {type(source_config)}") # Debug print
         self.episode_cb = EpisodeMetricsCallback(num_agents=num_agents)
         self.step_interval_cb = StepIntervalMetricsCallback(num_agents=num_agents, interval=interval)
         self._initialized = True
         # print("CombinedRLlibCallbacks: Initialized successfully.") # Debug print
 
     def on_algorithm_init(self, *, algorithm, **kwargs):
-        # print("CombinedRLlibCallbacks: on_algorithm_init called.") # Debug print
+        # print("CombinedRLlibCallbacks: on_algorithm_init called (driver).") # Debug print
         self._lazy_init(algorithm.config)
         
-        # Forward if sub-callbacks implement it and are initialized
-        if self.episode_cb and hasattr(self.episode_cb, "on_algorithm_init"):
-            self.episode_cb.on_algorithm_init(algorithm=algorithm, **kwargs)
-        if self.step_interval_cb and hasattr(self.step_interval_cb, "on_algorithm_init"):
-            self.step_interval_cb.on_algorithm_init(algorithm=algorithm, **kwargs)
+        if self._initialized: # Ensure initialized before forwarding
+            if self.episode_cb and hasattr(self.episode_cb, "on_algorithm_init"):
+                self.episode_cb.on_algorithm_init(algorithm=algorithm, **kwargs)
+            if self.step_interval_cb and hasattr(self.step_interval_cb, "on_algorithm_init"):
+                self.step_interval_cb.on_algorithm_init(algorithm=algorithm, **kwargs)
+
+    def on_worker_init(self, *, worker, **kwargs):
+        # print(f"CombinedRLlibCallbacks: on_worker_init called (worker PID: {os.getpid()}).") # Debug print
+        self._lazy_init(worker.config) # worker.config is an AlgorithmConfig instance
+        
+        if self._initialized: # Ensure initialized before forwarding
+            if self.episode_cb and hasattr(self.episode_cb, "on_worker_init"):
+                self.episode_cb.on_worker_init(worker=worker, **kwargs)
+            if self.step_interval_cb and hasattr(self.step_interval_cb, "on_worker_init"):
+                self.step_interval_cb.on_worker_init(worker=worker, **kwargs)
 
     def on_episode_start(self, *, worker, base_env, policies, episode, env_index, **kwargs):
         if not self._initialized:
-            # This path should ideally not be hit if on_algorithm_init is always called first.
-            # If it is, it indicates a problem with the callback lifecycle or setup.
-            # Trying to initialize here is risky as algorithm_config might not be easily accessible.
-            print("ERROR: CombinedRLlibCallbacks.on_episode_start called before initialization.")
-            return
+            print(f"ERROR: CombinedRLlibCallbacks.on_episode_start called before initialization (worker PID: {os.getpid()}). Attempting to init.")
+            # Fallback: try to initialize if somehow missed. This is a less ideal path.
+            # On a worker, worker.config should be available. On driver, this callback might not see `worker`.
+            if worker:
+                self._lazy_init(worker.config)
+            else:
+                # If on driver and not initialized, this is more problematic. Relies on on_algorithm_init or on_train_result.
+                print(f"ERROR: CombinedRLlibCallbacks.on_episode_start on DRIVER without worker and not initialized.")
+                return # Cannot proceed safely
+            if not self._initialized: # If still not initialized after attempt
+                 print(f"ERROR: CombinedRLlibCallbacks.on_episode_start failed to initialize (worker PID: {os.getpid()}).")
+                 return
 
         if self.episode_cb:
             self.episode_cb.on_episode_start(
@@ -522,8 +537,15 @@ class CombinedRLlibCallbacks(DefaultCallbacks):
 
     def on_episode_step(self, *, worker, base_env, policies, episode, env_index, **kwargs):
         if not self._initialized:
-            print("ERROR: CombinedRLlibCallbacks.on_episode_step called before initialization.")
-            return
+            print(f"ERROR: CombinedRLlibCallbacks.on_episode_step called before initialization (worker PID: {os.getpid()}). Attempting to init.")
+            if worker:
+                self._lazy_init(worker.config)
+            else:
+                print(f"ERROR: CombinedRLlibCallbacks.on_episode_step on DRIVER without worker and not initialized.")
+                return
+            if not self._initialized: # If still not initialized after attempt
+                 print(f"ERROR: CombinedRLlibCallbacks.on_episode_step failed to initialize (worker PID: {os.getpid()}).")
+                 return
         if self.episode_cb:
             self.episode_cb.on_episode_step(
                 worker=worker, base_env=base_env, policies=policies, episode=episode, env_index=env_index, **kwargs
@@ -535,8 +557,15 @@ class CombinedRLlibCallbacks(DefaultCallbacks):
 
     def on_episode_end(self, *, worker, base_env, policies, episode, env_index, **kwargs):
         if not self._initialized:
-            print("ERROR: CombinedRLlibCallbacks.on_episode_end called before initialization.")
-            return
+            print(f"ERROR: CombinedRLlibCallbacks.on_episode_end called before initialization (worker PID: {os.getpid()}). Attempting to init.")
+            if worker:
+                self._lazy_init(worker.config)
+            else:
+                print(f"ERROR: CombinedRLlibCallbacks.on_episode_end on DRIVER without worker and not initialized.")
+                return
+            if not self._initialized: # If still not initialized after attempt
+                 print(f"ERROR: CombinedRLlibCallbacks.on_episode_end failed to initialize (worker PID: {os.getpid()}).")
+                 return
         if self.episode_cb:
             self.episode_cb.on_episode_end(
                 worker=worker, base_env=base_env, policies=policies, episode=episode, env_index=env_index, **kwargs
@@ -546,12 +575,12 @@ class CombinedRLlibCallbacks(DefaultCallbacks):
     def on_train_result(self, *, algorithm, result: dict, **kwargs):
         # print("CombinedRLlibCallbacks: on_train_result called.") # Debug print
         if not self._initialized:
-            # Attempt lazy init again if on_algorithm_init was somehow skipped (e.g. resuming a very old checkpoint)
-            # print("CombinedRLlibCallbacks: Attempting lazy init from on_train_result.") # Debug print
+            # This primarily applies to the driver-side callback instance.
+            # print("CombinedRLlibCallbacks: Attempting lazy init from on_train_result (driver).") # Debug print
             self._lazy_init(algorithm.config) 
 
         if not self._initialized: # If still not initialized (e.g. config missing crucial keys)
-            print("ERROR: CombinedRLlibCallbacks.on_train_result called but still not initialized.")
+            print("ERROR: CombinedRLlibCallbacks.on_train_result called but still not initialized (driver).")
             return
 
         # EpisodeMetricsCallback does not have on_train_result.
