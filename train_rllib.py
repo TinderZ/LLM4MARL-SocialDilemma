@@ -5,6 +5,7 @@ import sys
 from datetime import datetime
 import pytz
 import pandas as pd # 新增导入
+import functools # +++ Import functools +++
 
 import ray
 from ray import tune
@@ -669,12 +670,13 @@ def main(args):
     else:
         raise ValueError(f"Unsupported algorithm: {args.algorithm}")
 
-    # Configure RLlib-specific callbacks
-    config = config.callbacks(CombinedRLlibCallbacks)
-    config = config.callbacks_config({
-        "num_agents": args.num_agents,
-        "interval": 50  # Default interval for StepIntervalMetricsCallback
-    })
+    # Configure RLlib-specific callbacks using functools.partial
+    callbacks_cls_with_args = functools.partial(
+        CombinedRLlibCallbacks,
+        num_agents=args.num_agents,
+        interval=50  # Default interval for StepIntervalMetricsCallback
+    )
+    config = config.callbacks(callbacks_cls_with_args)
 
     # Select correct registered model name
     if args.model == "baseline":
