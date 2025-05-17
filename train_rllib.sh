@@ -1,7 +1,7 @@
 #!/bin/bash
 
 # Set experiment name
-EXP_NAME="cleanup_PPO&llm_5-15"
+EXP_NAME="cleanup_PPO&llm_5-16"
 
 # Set environment and model configurations
 ENV="cleanup"
@@ -14,11 +14,12 @@ POLICY_MODE="decentralized"  # choices=["centralized", "decentralized", "two_pol
 
 NUM_WORKERS=1  # Optimized for multi-GPU parallelism
 NUM_ENVS_PER_WORKER=8  # Increased parallelism for environment instances
-ROLL_OUT_FRAGMENT_LENGTH=100
-TRAIN_BATCH_SIZE=$((NUM_WORKERS * NUM_ENVS_PER_WORKER * ROLL_OUT_FRAGMENT_LENGTH * 20))
-SGD_MINIBATCH_SIZE=2000
-NUM_SGD_ITER=5          # ppo epochs
+ROLL_OUT_FRAGMENT_LENGTH=1000
+TRAIN_BATCH_SIZE=$((NUM_WORKERS * NUM_ENVS_PER_WORKER * ROLL_OUT_FRAGMENT_LENGTH * 4))
+SGD_MINIBATCH_SIZE=1000
+NUM_SGD_ITER=8          # ppo epochs
 CHECKPOINT_FREQ=50      # save per N iter
+
 
 ENTROPY_COEFF=0.00176
 LR_SCHEDULE_STEPS="0 20000000"
@@ -28,9 +29,9 @@ GRAD_CLIP=40.0
 #PPO Epochs 或 Optimization Epochs
 
 # Set GPU configuration
-CPUS_PER_WORKER=4  # Adjusted based on CPU core availability
+CPUS_PER_WORKER=8  # Adjusted based on CPU core availability
 GPUS_PER_WORKER=1  # Each worker uses one GPU
-CPUS_FOR_DRIVER=11  # Number of CPU cores available for driver
+CPUS_FOR_DRIVER=20 # Number of CPU cores available for driver
 GPUS_FOR_DRIVER=0  # Use one GPU for driver (since GPUs are powerful)
 
 HORIZON=50 # short episode length, and use soft-horizon
